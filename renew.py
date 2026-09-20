@@ -48,6 +48,55 @@ for item in COOKIE_STR.split(";"):
         })
 
 
+def safe_click(locator, label="", timeout=15000):
+    """点击；被遮罩层拦截时退回 JS 原生 click（绕过 hit-testing）。
+
+    2026-09-20 定案：站点会插入全屏 CGU 遮罩（#fd-cgu-modal, z-index 30000），
+    Playwright 的常规 click 会因为 "intercepts pointer events" 直接 timeout
+    （run 35441369037）。JS 原生 click 不受 hit-testing 限制，做兜底。
+    """
+    try:
+        locator.first.click(timeout=timeout)
+        return True
+    except Exception as e:
+        print(f"⚠️ 常规点击{(' [' + label + ']') if label else ''}失败({repr(e)[:90]})，改用 JS 点击兜底...")
+        try:
+            locator.first.evaluate("el => el.click()")
+            return True
+        except Exception as e2:
+            print(f"❌ JS 点击也失败: {repr(e2)[:90]}")
+            return False
+
+
+def dismiss_cgu_modal(page):
+    """关掉 fridaydev 的 CGU 接受弹窗（#fd-cgu-modal）。
+
+    站点新增「Nos conditions d'utilisation ont été modifiées」全屏遮罩，
+    会 intercept pointer events，令续期按钮点唔到。优先点接受（服务器端
+    会记低 consent），其次点关闭叉，最后强制移除遮罩节点。
+    """
+    try:
+        if page.locator("#fd-cgu-modal").count() == 0:
+            return False
+        print("📜 检测到 CGU 弹窗，尝试关闭/接受...")
+        for sel in ["#fd-cgu-accept", "#fd-cgu-later", "#fd-cgu-modal .fd-cgu-close"]:
+            btn = page.locator(sel)
+            if btn.count() > 0 and btn.first.is_visible():
+                if safe_click(btn, sel, timeout=5000):
+                    print(f"✅ 已点击 CGU 弹窗按钮: {sel}")
+                    time.sleep(2)
+                    if page.locator("#fd-cgu-modal").count() == 0:
+                        print("✅ CGU 弹窗已消失")
+                        return True
+        page.evaluate("() => { const m = document.getElementById('fd-cgu-modal'); if (m) m.remove(); }")
+        print("🧹 CGU 弹窗仍在，已强制移除遮罩节点（避免拦截点击）")
+        time.sleep(1)
+        return True
+    except Exception as e:
+        print(f"⚠️ 处理 CGU 弹窗失败(忽略): {repr(e)[:120]}")
+        return False
+
+
 def extract_dates(page):
     """提取页面上的所有日期 (DD/MM/YYYY)"""
     try:
@@ -91,11 +140,14 @@ def run():
         try:
             accept_cookie_btn = page.locator("button:has-text('Accepter')")
             if accept_cookie_btn.count() > 0 and accept_cookie_btn.first.is_visible():
-                accept_cookie_btn.first.click()
+                safe_click(accept_cookie_btn, "cookie 提示条", timeout=5000)
                 print("🍪 已关闭底部 Cookie 提示条")
                 time.sleep(1)
         except Exception:
             pass
+
+        # 关掉/接受 CGU 全屏弹窗（唔关会 intercept pointer events 令续期按钮点唔到）
+        dismiss_cgu_modal(page)
 
         old_dates = extract_dates(page)
         print(f"📅 当前页面检测到日期: {old_dates}")
@@ -119,16 +171,24 @@ def run():
             target_text = renew_btn.first.inner_text().strip()
             print(f"🎉【成功锁定续期按钮】: 【{target_text}】，正在执行点击！")
 
-            # 点击续费按钮
-            renew_btn.first.click()
+            # 点击续费按钮（被遮罩拦截时自动退回 JS 点击）
+            if not safe_click(renew_btn, "续期按钮"):
+                # 再试一次：先再清一次遮罩
+                dismiss_cgu_modal(page)
+                if not safe_click(renew_btn, "续期按钮(重试)"):
+                    print("❌ 续期按钮点击失败")
+                    page.screenshot(path="result.png", full_page=True)
+                    tg_send("❌ <b>FridayDev 续期失败</b>\n续期按钮点唔到（可能又出咗新遮罩/改版），已截图")
+                    browser.close()
+                    sys.exit(EXIT_FAIL)
             time.sleep(4)
 
             # 确认弹窗处理（如果有）
             try:
                 modal_confirm = page.locator(".modal.show button, .modal.active button, .swal2-confirm, button:has-text('Confirmer'), button:has-text('Valider')").filter(has_not_text="suppression").filter(has_not_text="Résilier")
                 if modal_confirm.count() > 0 and modal_confirm.first.is_visible():
-                    modal_confirm.first.click(timeout=3000)
-                    print("✅ 已点击确认弹窗")
+                    if safe_click(modal_confirm, "确认弹窗", timeout=5000):
+                        print("✅ 已点击确认弹窗")
                     time.sleep(3)
             except Exception:
                 pass
