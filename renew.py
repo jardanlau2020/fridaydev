@@ -5,7 +5,16 @@ import time
 import json
 import urllib.request
 import urllib.parse
-from playwright.sync_api import sync_playwright
+# 2026-09-20：改用 patchright（undetected Playwright）做首選引擎。
+# 證據：weirdhost 探針 run 35501369694 —— 同一段點擊代碼，普通 playwright 撳完
+# 71 秒乜都冇，patchright 一撳即有 cf_clearance。指紋差別就係 CF 認唔認你。
+try:
+    from patchright.sync_api import sync_playwright
+    ENGINE = "patchright"
+except Exception:
+    from playwright.sync_api import sync_playwright
+    ENGINE = "playwright"
+print(f"[INFO] 浏览器引擎 = {ENGINE}", flush=True)
 
 COOKIE_STR = os.environ.get("COOKIE")
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")

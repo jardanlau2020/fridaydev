@@ -24,9 +24,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install playwright
+          pip install playwright patchright
           playwright install chromium
           playwright install-deps chromium
+          # patchright 自帶 Chromium（唔會同 playwright 撞），ARM 失敗會自己報錯
+          python -m patchright install chromium || echo '[WARN] patchright chromium 裝唔到，會退回 playwright'
 
       - name: Run Auto Renew Script
         env:
