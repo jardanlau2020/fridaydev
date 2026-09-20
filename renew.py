@@ -108,6 +108,8 @@ def wait_turnstile_token(page, timeout=45):
     """
     deadline = time.time() + timeout
     clicked = False
+    last_log = 0.0
+    start = time.time()
     while time.time() < deadline:
         try:
             got = page.evaluate(
@@ -119,6 +121,29 @@ def wait_turnstile_token(page, timeout=45):
                 return True
         except Exception:
             pass
+        # 每 5 秒打印一次驗證部件狀態（站方用 .fd-captcha-backdrop 彈窗 render Turnstile）
+        if time.time() - last_log > 5:
+            last_log = time.time()
+            try:
+                st = page.evaluate("""() => {
+                    const q = (s) => document.querySelector(s);
+                    const wid = q('.fd-captcha-widget');
+                    const box = wid ? (() => { const r = wid.getBoundingClientRect();
+                        return [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)]; })() : null;
+                    const inp = q('input[name="cf-turnstile-response"]');
+                    return {
+                        t: %d,
+                        backdrop: !!q('.fd-captcha-backdrop'),
+                        widget_box: box,
+                        msg: (q('.fd-captcha-msg') || {}).textContent || null,
+                        turnstile_api: typeof window.turnstile,
+                        token_len: inp ? (inp.value || '').length : -1,
+                        iframes: Array.from(document.querySelectorAll('iframe')).map(f => (f.src || '').slice(0, 60)).slice(0, 5)
+                    };
+                }""" % int(time.time() - start))
+                print(f"   [CAPTCHA] {st}")
+            except Exception as e:
+                print(f"   [CAPTCHA] 狀態讀取失敗: {repr(e)[:100]}")
         try:
             fr = page.locator("iframe[src*='challenges.cloudflare.com']")
             if fr.count() > 0:
@@ -187,8 +212,16 @@ def run():
             api_results.append(("dialog", d.message[:200]))
             d.accept()
 
+        def _on_console(msg):
+            try:
+                if msg.type in ("error", "warning"):
+                    print(f"   [CONSOLE:{msg.type}] {msg.text[:180]}")
+            except Exception:
+                pass
+
         page.on("response", _on_response)
         page.on("dialog", _on_dialog)
+        page.on("console", _on_console)
 
         print("1. 正在访问服务页面...")
         page.goto("https://fridaydev.fr/services/", wait_until="domcontentloaded", timeout=60000)
