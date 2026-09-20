@@ -97,6 +97,49 @@ def dismiss_cgu_modal(page):
         return False
 
 
+def wait_turnstile_token(page, timeout=45):
+    """等 Turnstile 互動驗證通過。
+
+    2026-09-20 定案：`/php/renew_free_service.php` 對免費續期每次都要過反機械人測試
+    （HTTP 428 + `captcha_required`，前端用 `window.fdCaptchaSolve()` render
+    Cloudflare Turnstile）。無 token 就 alert("Renouvellement impossible.")
+    然後按鈕復位 —— 舊版腳本照當「續期成功」（run 35496183082/35496473395）。
+    呢度只係點個 widget 嘅 checkbox（managed 模式多數自動過），唔係 solver。
+    """
+    deadline = time.time() + timeout
+    clicked = False
+    while time.time() < deadline:
+        try:
+            got = page.evaluate(
+                """() => { const e = document.querySelector('input[name="cf-turnstile-response"]'); """
+                """return !!(e && e.value && e.value.length > 20); }"""
+            )
+            if got:
+                print("✅ Turnstile 驗證已通過（token 到手）")
+                return True
+        except Exception:
+            pass
+        try:
+            fr = page.locator("iframe[src*='challenges.cloudflare.com']")
+            if fr.count() > 0:
+                box = fr.first.bounding_box()
+                if box and box.get("width", 0) > 0 and not clicked:
+                    cx = box["x"] + 30
+                    cy = box["y"] + box["height"] / 2
+                    page.mouse.move(max(0, cx - 45), max(0, cy - 18))
+                    time.sleep(0.35)
+                    page.mouse.move(cx, cy, steps=12)
+                    time.sleep(0.25)
+                    page.mouse.click(cx, cy)
+                    clicked = True
+                    print("🖱️ 已點 Turnstile widget，等驗證通過…")
+        except Exception:
+            pass
+        time.sleep(1)
+    print("⚠️ 等 Turnstile 逾時（token 未到手）")
+    return False
+
+
 def extract_dates(page):
     """提取页面上的所有日期 (DD/MM/YYYY)"""
     try:
@@ -121,6 +164,31 @@ def run():
 
         context.add_cookies(cookies)
         page = context.new_page()
+
+        # ── 監聽續期 API 同 alert（2026-09-20）：之前冇監聽，428/alert 全部走漏，
+        #    所以「按鈕點完冇反應」被誤報成「續期成功」。──
+        api_results = []
+
+        def _on_response(resp):
+            try:
+                u = resp.url
+                if "renew_free_service.php" in u or "renew_server.php" in u:
+                    try:
+                        body = resp.text()[:300]
+                    except Exception:
+                        body = ""
+                    api_results.append((resp.status, body))
+                    print(f"   [API] {resp.status} {u.split('/')[-1]} {body[:200]}")
+            except Exception:
+                pass
+
+        def _on_dialog(d):
+            print(f"   [ALERT:{d.type}] {d.message[:200]}")
+            api_results.append(("dialog", d.message[:200]))
+            d.accept()
+
+        page.on("response", _on_response)
+        page.on("dialog", _on_dialog)
 
         print("1. 正在访问服务页面...")
         page.goto("https://fridaydev.fr/services/", wait_until="domcontentloaded", timeout=60000)
@@ -183,6 +251,16 @@ def run():
                     sys.exit(EXIT_FAIL)
             time.sleep(4)
 
+            # 428 + captcha_required → 前端會 render Cloudflare Turnstile，等佢過
+            print("🔐 檢查反機械人驗證（Turnstile）…")
+            wait_turnstile_token(page, timeout=45)
+            # 等續期 API 真正回覆（成功/失敗）
+            for _ in range(30):
+                if api_results and (api_results[-1][0] == 200 or api_results[-1][0] == "dialog"):
+                    break
+                time.sleep(1)
+            time.sleep(2)
+
             # 确认弹窗处理（如果有）
             try:
                 modal_confirm = page.locator(".modal.show button, .modal.active button, .swal2-confirm, button:has-text('Confirmer'), button:has-text('Valider')").filter(has_not_text="suppression").filter(has_not_text="Résilier")
@@ -202,19 +280,37 @@ def run():
             new_page_text = page.inner_text("body")
 
             print(f"📅 刷新后页面日期: {new_dates}")
+            print(f"🧾 續期 API 記錄: {api_results[-3:] if api_results else '（完全冇呼叫過續期 API）'}")
+
+            ok_api = any(
+                isinstance(s, int) and s == 200 and '"success":true' in (b or "").replace(" ", "").lower()
+                for s, b in api_results
+            )
+            still_renewable = "Renouveler gratuitement" in new_page_text
 
             if "Renouvelable dans" in new_page_text:
                 msg = "🎉🎉 <b>FridayDev 续期成功！</b>\n按钮已进入下一次续期倒计时状态。"
                 print(msg)
                 tg_send(msg + f"\n📅 新到期日: {', '.join(new_dates[:3])}")
-            elif "Actif" in new_page_text and "Suspendu" not in new_page_text:
-                msg = "🎉🎉 <b>FridayDev 续期成功！</b>\n服务状态为 【Actif (正常运行)】"
+            elif ok_api and not still_renewable:
+                msg = "🎉🎉 <b>FridayDev 续期成功！</b>\n续期 API 返回 success，按钮已复位。"
+                print(msg)
+                tg_send(msg + f"\n📅 新到期日: {', '.join(new_dates[:3])}")
+            elif ok_api:
+                msg = "✅ <b>FridayDev 续期已完成（API 确认）</b>，页面按钮状态稍后刷新。"
                 print(msg)
                 tg_send(msg + f"\n📅 新到期日: {', '.join(new_dates[:3])}")
             else:
-                msg = "✅ <b>FridayDev 续期流程已完成</b>，请查看截图确认。"
+                # 按鈕仲喺度／API 冇成功 —— 老實報紅，唔好再報假成功
+                trace = "; ".join(f"{s}:{str(b)[:80]}" for s, b in api_results[-3:]) or "無 API 呼叫"
+                msg = ("❌ <b>FridayDev 续期未成功</b>\n"
+                       "续期 API 未回 success（大概率係反機械人測試 Turnstile 未過）。\n"
+                       f"API 記錄: {trace[:300]}")
                 print(msg)
-                tg_send(msg + f"\n📅 刷新后日期: {', '.join(new_dates[:3])}")
+                tg_send(msg)
+                page.screenshot(path="result.png", full_page=True)
+                browser.close()
+                sys.exit(EXIT_FAIL)
 
         elif not_yet_btn.count() > 0:
             status_text = not_yet_btn.first.inner_text().strip()
