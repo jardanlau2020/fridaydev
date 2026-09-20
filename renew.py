@@ -109,6 +109,7 @@ def wait_turnstile_token(page, timeout=45):
     deadline = time.time() + timeout
     clicked = False
     last_log = 0.0
+    last_click = 0.0
     start = time.time()
     while time.time() < deadline:
         try:
@@ -160,6 +161,25 @@ def wait_turnstile_token(page, timeout=45):
                     print("🖱️ 已點 Turnstile widget，等驗證通過…")
         except Exception:
             pass
+        # 2026-09-20：實測 .fd-captcha-widget 有 render（378x73）但頁面 **完全冇 iframe**
+        # （Turnstile 收喺 closed shadow DOM）→ 退返用容器座標直接點 widget 左邊 checkbox 位。
+        if not clicked and time.time() - last_click > 10:
+            try:
+                wbox = page.evaluate("""() => { const w = document.querySelector('.fd-captcha-widget');
+                    if (!w) return null; const r = w.getBoundingClientRect();
+                    return (r.width > 50) ? [r.x, r.y, r.width, r.height] : null; }""")
+                if wbox:
+                    cx = wbox[0] + 30
+                    cy = wbox[1] + wbox[3] / 2
+                    page.mouse.move(max(0, cx - 45), max(0, cy - 18))
+                    time.sleep(0.35)
+                    page.mouse.move(cx, cy, steps=12)
+                    time.sleep(0.25)
+                    page.mouse.click(cx, cy)
+                    last_click = time.time()
+                    print(f"🖱️ 已點驗證 widget 容器（{int(cx)},{int(cy)}），等驗證通過…")
+            except Exception:
+                pass
         time.sleep(1)
     print("⚠️ 等 Turnstile 逾時（token 未到手）")
     return False
