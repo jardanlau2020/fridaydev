@@ -57,6 +57,24 @@ for item in COOKIE_STR.split(";"):
         })
 
 
+def human_click(page, x, y):
+    """2026-09-20：似真人嘅點擊序列。
+
+    證據：run 35502154511（已換 patchright）用 `page.mouse.click()` 撳 Turnstile，
+    widget 即刻回 `Le test a échoué. Rechargez la page et réessayez.`；
+    mouse.click() 係 down→up 零延遲、無中途移動 —— 典型機器人特徵。
+    """
+    page.mouse.move(max(0, x - 60), max(0, y - 25), steps=4)
+    time.sleep(0.25)
+    page.mouse.move(x - 8, y - 3, steps=6)
+    time.sleep(0.35)
+    page.mouse.move(x, y, steps=3)
+    time.sleep(0.45)
+    page.mouse.down()
+    time.sleep(0.12)
+    page.mouse.up()
+
+
 def safe_click(locator, label="", timeout=15000):
     """点击；被遮罩层拦截时退回 JS 原生 click（绕过 hit-testing）。
 
@@ -106,7 +124,7 @@ def dismiss_cgu_modal(page):
         return False
 
 
-def wait_turnstile_token(page, timeout=45):
+def wait_turnstile_token(page, timeout=75):
     """等 Turnstile 互動驗證通過。
 
     2026-09-20 定案：`/php/renew_free_service.php` 對免費續期每次都要過反機械人測試
@@ -154,6 +172,13 @@ def wait_turnstile_token(page, timeout=45):
                 print(f"   [CAPTCHA] {st}")
             except Exception as e:
                 print(f"   [CAPTCHA] 狀態讀取失敗: {repr(e)[:100]}")
+        # 2026-09-20（run 35502154511 之後）：站方 widget 係 Cloudflare「managed」模式，
+        # 好多時唔使撳都會自己過；我哋一撳就即刻換嚟 "Le test a échoué"。所以改成
+        # 先靜觀 25 秒（完全唔撳），唔得先人手式撳一次。
+        quiet = 25
+        if time.time() - start < quiet:
+            time.sleep(1)
+            continue
         try:
             fr = page.locator("iframe[src*='challenges.cloudflare.com']")
             if fr.count() > 0:
@@ -161,11 +186,7 @@ def wait_turnstile_token(page, timeout=45):
                 if box and box.get("width", 0) > 0 and not clicked:
                     cx = box["x"] + 30
                     cy = box["y"] + box["height"] / 2
-                    page.mouse.move(max(0, cx - 45), max(0, cy - 18))
-                    time.sleep(0.35)
-                    page.mouse.move(cx, cy, steps=12)
-                    time.sleep(0.25)
-                    page.mouse.click(cx, cy)
+                    human_click(page, cx, cy)
                     clicked = True
                     print("🖱️ 已點 Turnstile widget，等驗證通過…")
         except Exception:
@@ -180,11 +201,7 @@ def wait_turnstile_token(page, timeout=45):
                 if wbox:
                     cx = wbox[0] + 30
                     cy = wbox[1] + wbox[3] / 2
-                    page.mouse.move(max(0, cx - 45), max(0, cy - 18))
-                    time.sleep(0.35)
-                    page.mouse.move(cx, cy, steps=12)
-                    time.sleep(0.25)
-                    page.mouse.click(cx, cy)
+                    human_click(page, cx, cy)
                     last_click = time.time()
                     print(f"🖱️ 已點驗證 widget 容器（{int(cx)},{int(cy)}），等驗證通過…")
             except Exception:
@@ -315,7 +332,7 @@ def run():
 
             # 428 + captcha_required → 前端會 render Cloudflare Turnstile，等佢過
             print("🔐 檢查反機械人驗證（Turnstile）…")
-            wait_turnstile_token(page, timeout=45)
+            wait_turnstile_token(page, timeout=75)
             # 等續期 API 真正回覆（成功/失敗）
             for _ in range(30):
                 if api_results and (api_results[-1][0] == 200 or api_results[-1][0] == "dialog"):
