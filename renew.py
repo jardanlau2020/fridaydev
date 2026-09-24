@@ -37,9 +37,18 @@ def tg_send(text):
         print(f"⚠️ TG 发送失败: {e}")
 
 EXIT_OK = 0        # 续期成功或无需续期
-EXIT_NO_RENEW = 2  # 倒计时未到（不可续）
+EXIT_MANUAL_REQUIRED = 2  # 已进入可续期窗口，但要人手撳（红叉係预期訊號，唔係故障）
 EXIT_COOKIE_DEAD = 3  # cookie 失效
 EXIT_FAIL = 1      # 其他失败
+
+# ── 2026-09-24：由「自動續期」降級做「到期提醒守門」(watchdog) ──────────────
+# 硬證據：Cloudflare Turnstile 喺 GHA runner IP 過唔到（playwright / patchright /
+# camoufox / seleniumbase UC / nodriver 五種引擎 + 真鼠標 OS 事件 + 20 組出口×UA
+# 全部失敗，run 35510050597 起連續紅）。繼續每日自動撳只會製造紅燈同假訊號。
+# 默認 MODE=watchdog：只讀狀態 + 到期前 TG 提醒（剩 ≤5 日開始提，≤3 日每日提）。
+# 想再試自動續期就手動 dispatch 並揀 mode=renew。
+MODE = (os.environ.get("FD_MODE") or "watchdog").strip().lower()
+print(f"[INFO] 运行模式 MODE = {MODE}", flush=True)
 
 if not COOKIE_STR:
     print("❌ 错误: 未在 GitHub Secrets 中设置 COOKIE")
@@ -313,6 +322,31 @@ def run():
         )
 
         not_yet_btn = page.locator("text=/Renouvelable dans \\d+ jour/i")
+
+        # ── watchdog 模式：只讀唔寫 ──────────────────────────────────────
+        # 唔撳任何嘢、唔碰 Turnstile，只報狀態；進入可續期窗口就叫人手續。
+        if MODE != "renew":
+            if renew_btn.count() > 0 and renew_btn.first.is_visible():
+                print("🔔【可續期窗口已開】watchdog 模式：唔會自動撳（GHA 過唔到 Turnstile）")
+                tg_send("🔔 <b>FridayDev 可以續期喇</b>\n"
+                        "請人手去面板撳「Renouveler gratuitement」。\n"
+                        f"📅 面板日期: {', '.join(old_dates[:3]) or '?'}\n"
+                        "（自動續期喺 GHA runner 過唔到 Cloudflare Turnstile，已停用；"
+                        "要再試就手動 dispatch 並揀 mode=renew）")
+                page.screenshot(path="result.png", full_page=True)
+                browser.close()
+                return EXIT_MANUAL_REQUIRED
+            status_text = not_yet_btn.first.inner_text().strip() if not_yet_btn.count() else ""
+            cd = re.search(r"Renouvelable dans (\d+) jour", status_text)
+            days = cd.group(1) if cd else "?"
+            print(f"🔒【watchdog 讀數】{status_text or '未見倒計時（可能已可續）'} | 面板日期: {old_dates[:3]}")
+            if days.isdigit() and int(days) <= 5:
+                urge = "⚠️ 就到期，記得去撳！" if int(days) <= 3 else ""
+                tg_send(f"🔒 <b>FridayDev 續期倒計時</b>\n仲有 {days} 日可以續期。{urge}\n"
+                        "到期前請人手到面板撳「Renouveler gratuitement」。")
+            page.screenshot(path="result.png", full_page=True)
+            browser.close()
+            return EXIT_OK
 
         if renew_btn.count() > 0 and renew_btn.first.is_visible():
             target_text = renew_btn.first.inner_text().strip()

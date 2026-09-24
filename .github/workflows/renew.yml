@@ -2,8 +2,18 @@ name: Auto Renew FridayDev Service
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'watchdog = 只讀狀態+到期提醒（默認）；renew = 真係試自動續期（GHA 過唔到 Turnstile，預期紅）'
+        required: false
+        default: 'watchdog'
+        type: choice
+        options:
+          - watchdog
+          - renew
   schedule:
-    # 每日北京 15:05（UTC 07:05）—— 倒计时剩 ≤2 天即可续，每日一跑足够
+    # 每日北京 15:05（UTC 07:05）—— 只做「到期提醒守門」：讀倒計時、剩 ≤5 日開始 TG 提人
+    # 2026-09-24 起唔再自動撳續期（Turnstile 喺 runner IP 實測過唔到），詳見 renew.py 頂註
     - cron: '5 7 * * *'
 
 permissions:
@@ -35,6 +45,8 @@ jobs:
           COOKIE: ${{ secrets.COOKIE }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          # 默認 watchdog；只有人手 dispatch 揀 mode=renew 先會真撳續期
+          FD_MODE: ${{ github.event.inputs.mode || 'watchdog' }}
         run: |
           python renew.py
 
