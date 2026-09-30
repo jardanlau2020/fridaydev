@@ -59,33 +59,32 @@ def _clip(t, limit):
 
 
 def build_tg(action, detail="", expire="", key="", human=False):
-    """瘦身版通知：統計一行 ＋ 每項一行
-
-    action: ok（已續期）／skip（未可續）／fail（失敗）
-    expire: ok 用嘅新到期（MM-DD HH:MM 或 MM-DD）
-    key  : skip 用嘅第三格（例如「面板 09-30」）
-    human: 需要人手介入 → 加 ⚠️ 一行
-    """
-    n_ok = 1 if action == "ok" else 0
-    n_skip = 1 if action == "skip" else 0
-    n_bad = 1 if action == "fail" else 0
-    lines = ["🎮 FridayDev ｜ {} ｜ ✅ {} ｜ ⏭️ {} ｜ ❌ {}".format(
-        now_local(), n_ok, n_skip, n_bad)]
-    bits = ["▪️ fridaydev.fr 免費服務"]
+    """方案 B (極致精簡人話版): 每台精準兩行，徹底消滅頂部計數器"""
+    name = "FridayDev"
     if action == "ok":
-        bits.append("✅ 已續期" + (f" → {expire}" if expire else ""))
+        l1 = f"✅ {name} · 成功續期" + (f"至 {expire}" if expire else "")
+        l2 = "ℹ️ 服務已自動展期"
+        return _esc_html(f"{l1}\n{l2}")
     elif action == "skip":
-        bits.append("⏭️ " + (detail or "未可續"))
-        if expire:
-            key = key or f"到期 {expire}"
+        # 提取剩餘天數 (如 detail="未可續（仲有 4 日）")
+        rem = ""
+        m = re.search(r"仲有\s*([^，）]+)", detail or "")
+        if m:
+            rem = f"（剩 {m.group(1)}）"
+        l1 = f"🟢 {name} · 狀態良好{rem}"
+        info_parts = []
         if key:
-            bits.append(key)
+            info_parts.append(f"{key} 到期" if "到期" not in key else key)
+        elif expire:
+            info_parts.append(f"{expire} 到期")
+        info_parts.append("續期窗口即將開啟" if human else "未到續期窗口")
+        l2 = "ℹ️ " + " · ".join(info_parts)
+        return _esc_html(f"{l1}\n{l2}")
     else:
-        bits.append("❌ " + _clip(detail or "失敗", 60))
-    lines.append(" · ".join(bits))
-    if n_bad or human:
-        lines.append("⚠️ 睇 workflow log 排查")
-    return _esc_html("\n".join(lines))
+        l1 = f"🚨 {name} · 續期未完成"
+        reason = _clip(detail or "執行失敗", 60)
+        l2 = f"⚠️ {reason} · 請登入面板手動處理"
+        return _esc_html(f"{l1}\n{l2}")
 
 EXIT_OK = 0        # 续期成功或无需续期
 EXIT_MANUAL_REQUIRED = 2  # 已进入可续期窗口，但要人手撳（红叉係预期訊號，唔係故障）
