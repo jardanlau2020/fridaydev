@@ -36,6 +36,57 @@ def tg_send(text):
     except Exception as e:
         print(f"⚠️ TG 发送失败: {e}")
 
+
+def now_local():
+    """UTC+8 當地時間 MM-DD HH:MM (runner 係 UTC)"""
+    return time.strftime("%m-%d %H:%M", time.gmtime(time.time() + 8 * 3600))
+
+
+def fmt_date(v):
+    """面板日期 DD/MM/YYYY → MM-DD（解析唔到就回空字串）"""
+    m = re.search(r"(\d{2})/(\d{2})/(\d{4})", str(v or ""))
+    return f"{m.group(2)}-{m.group(1)}" if m else ""
+
+
+def _esc_html(t):
+    """TG 行 HTML 模式：動態文字要逃逸 <>& ，唔可以爆 parse"""
+    return str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _clip(t, limit):
+    s = str(t or "").strip()
+    return s if len(s) <= limit else s[: limit - 1] + "…"
+
+
+def build_tg(action, detail="", expire="", key="", human=False):
+    """瘦身版通知：統計一行 ＋ 每項一行
+
+    action: ok（已續期）／skip（未可續）／fail（失敗）
+    expire: ok 用嘅新到期（MM-DD HH:MM 或 MM-DD）
+    key  : skip 用嘅第三格（例如「面板 09-30」）
+    human: 需要人手介入 → 加 ⚠️ 一行
+    """
+    n_ok = 1 if action == "ok" else 0
+    n_skip = 1 if action == "skip" else 0
+    n_bad = 1 if action == "fail" else 0
+    lines = ["🎮 FridayDev ｜ {} ｜ ✅ {} ｜ ⏭️ {} ｜ ❌ {}".format(
+        now_local(), n_ok, n_skip, n_bad)]
+    bits = ["▪️ fridaydev.fr 免費服務"]
+    if action == "ok":
+        bits.append("✅ 已續期" + (f" → {expire}" if expire else ""))
+    elif action == "skip":
+        bits.append("⏭️ " + (detail or "未可續"))
+        if expire:
+            key = key or f"到期 {expire}"
+        if key:
+            bits.append(key)
+    else:
+        bits.append("❌ " + _clip(detail or "失敗", 60))
+    lines.append(" · ".join(bits))
+    if n_bad or human:
+        lines.append("⚠️ 睇 workflow log 排查")
+    return _esc_html("\n".join(lines))
+
 EXIT_OK = 0        # 续期成功或无需续期
 EXIT_MANUAL_REQUIRED = 2  # 已进入可续期窗口，但要人手撳（红叉係预期訊號，唔係故障）
 EXIT_COOKIE_DEAD = 3  # cookie 失效
@@ -285,7 +336,7 @@ def run():
         page_text = page.inner_text("body")
         if "Mes services" not in page_text and "fridaydev" not in page_text.lower():
             print("❌ Cookie 已失效，请更新 Secrets 中的 COOKIE")
-            tg_send("❌ <b>FridayDev 续期失败</b>\nCookie 已失效，请重新抓取并更新 GitHub Secrets")
+            tg_send(build_tg("fail", "Cookie 已失效，請重新抓取並更新 Secrets 嘅 COOKIE"))
             page.screenshot(path="result.png", full_page=True)
             browser.close()
             sys.exit(EXIT_COOKIE_DEAD)
@@ -328,11 +379,9 @@ def run():
         if MODE != "renew":
             if renew_btn.count() > 0 and renew_btn.first.is_visible():
                 print("🔔【可續期窗口已開】watchdog 模式：唔會自動撳（GHA 過唔到 Turnstile）")
-                tg_send("🔔 <b>FridayDev 可以續期喇</b>\n"
-                        "請人手去面板撳「Renouveler gratuitement」。\n"
-                        f"📅 面板日期: {', '.join(old_dates[:3]) or '?'}\n"
-                        "（自動續期喺 GHA runner 過唔到 Cloudflare Turnstile，已停用；"
-                        "要再試就手動 dispatch 並揀 mode=renew）")
+                tg_send(build_tg("skip", "未可續（要人手撳）",
+                                 key=("面板 " + fmt_date(old_dates[0])) if old_dates else "",
+                                 human=True))
                 page.screenshot(path="result.png", full_page=True)
                 browser.close()
                 return EXIT_MANUAL_REQUIRED
@@ -341,9 +390,11 @@ def run():
             days = cd.group(1) if cd else "?"
             print(f"🔒【watchdog 讀數】{status_text or '未見倒計時（可能已可續）'} | 面板日期: {old_dates[:3]}")
             if days.isdigit() and int(days) <= 5:
-                urge = "⚠️ 就到期，記得去撳！" if int(days) <= 3 else ""
-                tg_send(f"🔒 <b>FridayDev 續期倒計時</b>\n仲有 {days} 日可以續期。{urge}\n"
-                        "到期前請人手到面板撳「Renouveler gratuitement」。")
+                urgent = int(days) <= 3
+                reason = f"仲有 {days} 日" + ("，要人手撳" if urgent else "")
+                tg_send(build_tg("skip", f"未可續（{reason}）",
+                                 key=("面板 " + fmt_date(old_dates[0])) if old_dates else "",
+                                 human=urgent))
             page.screenshot(path="result.png", full_page=True)
             browser.close()
             return EXIT_OK
@@ -359,7 +410,7 @@ def run():
                 if not safe_click(renew_btn, "续期按钮(重试)"):
                     print("❌ 续期按钮点击失败")
                     page.screenshot(path="result.png", full_page=True)
-                    tg_send("❌ <b>FridayDev 续期失败</b>\n续期按钮点唔到（可能又出咗新遮罩/改版），已截图")
+                    tg_send(build_tg("fail", "續期按鈕點唔到（可能又出新遮罩／改版），已截圖"))
                     browser.close()
                     sys.exit(EXIT_FAIL)
             time.sleep(4)
@@ -401,18 +452,17 @@ def run():
             )
             still_renewable = "Renouveler gratuitement" in new_page_text
 
+            exp_new = fmt_date(new_dates[0]) if new_dates else ""
+
             if "Renouvelable dans" in new_page_text:
-                msg = "🎉🎉 <b>FridayDev 续期成功！</b>\n按钮已进入下一次续期倒计时状态。"
-                print(msg)
-                tg_send(msg + f"\n📅 新到期日: {', '.join(new_dates[:3])}")
+                print("🎉🎉 FridayDev 续期成功！按钮已进入下一次续期倒计时状态。")
+                tg_send(build_tg("ok", expire=exp_new))
             elif ok_api and not still_renewable:
-                msg = "🎉🎉 <b>FridayDev 续期成功！</b>\n续期 API 返回 success，按钮已复位。"
-                print(msg)
-                tg_send(msg + f"\n📅 新到期日: {', '.join(new_dates[:3])}")
+                print("🎉🎉 FridayDev 续期成功！续期 API 返回 success，按钮已复位。")
+                tg_send(build_tg("ok", expire=exp_new))
             elif ok_api:
-                msg = "✅ <b>FridayDev 续期已完成（API 确认）</b>，页面按钮状态稍后刷新。"
-                print(msg)
-                tg_send(msg + f"\n📅 新到期日: {', '.join(new_dates[:3])}")
+                print("✅ FridayDev 续期已完成（API 确认），页面按钮状态稍后刷新。")
+                tg_send(build_tg("ok", expire=exp_new))
             else:
                 # 按鈕仲喺度／API 冇成功 —— 老實報紅，唔好再報假成功
                 trace = "; ".join(f"{s}:{str(b)[:80]}" for s, b in api_results[-3:]) or "無 API 呼叫"
@@ -420,7 +470,7 @@ def run():
                        "续期 API 未回 success（大概率係反機械人測試 Turnstile 未過）。\n"
                        f"API 記錄: {trace[:300]}")
                 print(msg)
-                tg_send(msg)
+                tg_send(build_tg("fail", f"API 未回 success（大概率 Turnstile 未過）· {trace}"))
                 page.screenshot(path="result.png", full_page=True)
                 browser.close()
                 sys.exit(EXIT_FAIL)
@@ -432,7 +482,7 @@ def run():
             print(f"🔒【暂不可续期】倒计时状态: 【{status_text}】")
             # 静默：倒计时 > 2 天不发 TG；剩 0-2 天先提醒（就快到期要手动留意）
             if days.isdigit() and int(days) <= 2:
-                tg_send(f"🔒 <b>FridayDev 续期倒计时</b>\n还有 {days} 天可续期，下次运行将自动续")
+                tg_send(build_tg("skip", f"未可續（仲有 {days} 日，下次自動續）"))
         else:
             print("ℹ️ 未发现续期按钮，当前可能已成功续期。")
 
