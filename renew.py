@@ -33,12 +33,15 @@
     · 原来「未发现续期按钮」走 exit 0 且文案说「可能已成功续期」，现在映射成
       SKIPPED（exit 0 不变），文案照旧。
 
-已知文案缺陷（本次迁移刻意**原样保留**，详见 README「已知文案缺陷」）：
-    build_tg() 处理 skip 时只从 detail 里正则抽「仲有 X 日」做第一行，括号里
-    逗号之后那句（「要人手撳」/「下次自動續」）被整个丢掉；而且进窗口那条的
-    第一行还说「狀態良好」、第二行说「即將開啟」—— 窗口其实已经开了。
-    三处出口都中招。没顺手改是因为改了就跟原版没法逐字对比。
-    harness 的 B3d / B5c / B14c 把这个行为钉死了，改文案会立刻撞红。
+文案修复（迁移验收通过后单独做的一次改动，见 README「skip 文案的三处出口」）：
+    迁移时把原版 skip 文案的缺陷**原样保留**了（B3d / B5c / B14c 钉住），
+    验收绿了之后才动手。原缺陷是：build_tg() 处理 skip 时只从 detail 里正则抽
+    「仲有 X 日」，括号里逗号之后那句被整个丢掉；而且「窗口已经开了」那条的第一行
+    还说「狀態良好」、第二行说「即將開啟」—— 那是全系统唯一一条**要人行动**的通知，
+    却说「一切正常」，看的人划走，然后服务器到期被删。
+    改法：给「窗口已开」单开一个 `open_now=True` 出口（🔔 抬头 + 明写要手点），
+    ≤3 天的「预备提醒」保持 🟢 但只升到「即將開啟」（窗口没开就不该叫人去撳），
+    renew 模式的「下次自動續」用 `note=` 带出来。三处出口都不再靠正则拆散文。
 
 引擎选择（2026-09-20 的结论，原样保留）：
     首选 patchright（undetected Playwright）。证据：weirdhost 探针 run 35501369694
@@ -140,28 +143,51 @@ def fmt_date(v) -> str:
     return f"{m.group(2)}-{m.group(1)}" if m else ""
 
 
-def build_tg(action, detail="", expire="", key="", human=False) -> str:
-    """方案 B (極致精簡人話版): 每台精準兩行，徹底消滅頂部計數器。"""
+def build_tg(action, detail="", expire="", key="", human=False,
+             open_now=False, note="") -> str:
+    """方案 B (極致精簡人話版): 每台精準兩行，徹底消滅頂部計數器。
+
+    三个 skip 语境分开建模，别再靠正则拆散文：
+
+    · ``open_now=True`` —— 续期窗口**已经开了**，页面上就有按钮，只差人去撳。
+      全系统唯一一条要人行动的通知，所以单独用 🔔 抬头 + 明写「請人手撳」。
+    · ``human=True``    —— 窗口还没开，但倒计时 ≤3 天，属于「预备提醒」。
+      抬头仍是 🟢，第二行升到「續期窗口即將開啟」。
+    · ``note="..."``    —— 其余情况想在第二行补一句（如 renew 模式的「下次自動續」），
+      顶替默认的「未到續期窗口」。
+    """
     name = SERVICE
     if action == "ok":
         l1 = f"✅ {name} · 成功續期" + (f"至 {expire}" if expire else "")
         l2 = "ℹ️ 服務已自動展期"
         return esc_html(f"{l1}\n{l2}")
     elif action == "skip":
-        # 提取剩餘天數 (如 detail="未可續（仲有 4 日）")
+        # 第一行的「（剩 N 日）」仍然从 detail 里捞 —— 这个位置适合正则，
+        # 因为天数本来就是从页面读数来的，不是文案。
         rem = ""
         m = re.search(r"仲有\s*([^，）]+)", detail or "")
         if m:
             rem = f"（剩 {m.group(1)}）"
-        l1 = f"🟢 {name} · 狀態良好{rem}"
         info_parts = []
         if key:
             info_parts.append(f"{key} 到期" if "到期" not in key else key)
         elif expire:
             info_parts.append(f"{expire} 到期")
-        info_parts.append("續期窗口即將開啟" if human else "未到續期窗口")
-        l2 = "ℹ️ " + " · ".join(info_parts)
-        return esc_html(f"{l1}\n{l2}")
+        if open_now:
+            # 窗口已开：抬头换 🔔、第二行点名要手点。
+            # 修复前的样子是「🟢 狀態良好 / 續期窗口即將開啟」—— 窗口都开了还说
+            # 「即將開啟」，用户划走，服务器到期被删。harness B3d 钉住新文案。
+            info_parts.append("請人手撳「Renouveler gratuitement」")
+            return esc_html(f"🔔 {name} · 續期窗口已開{rem}\n"
+                            f"ℹ️ " + " · ".join(info_parts))
+        l1 = f"🟢 {name} · 狀態良好{rem}"
+        if human:
+            info_parts.append("續期窗口即將開啟")
+        elif note:
+            info_parts.append(note)
+        else:
+            info_parts.append("未到續期窗口")
+        return esc_html(f"{l1}\nℹ️ " + " · ".join(info_parts))
     else:
         l1 = f"🚨 {name} · 續期未完成"
         reason = shorten(detail or "執行失敗", 60)
@@ -478,7 +504,8 @@ def run(raw_cookie: str):
                 if renew_btn.count() > 0 and renew_btn.first.is_visible():
                     print("🔔【可續期窗口已開】watchdog 模式：唔會自動撳"
                           "（GHA 過唔到 Turnstile）")
-                    tg_send(build_tg("skip", "未可續（要人手撳）", key=key, human=True))
+                    # open_now=True：窗口真开了，通知必须明说「去手点」。
+                    tg_send(build_tg("skip", "", key=key, open_now=True))
                     page.screenshot(path="result.png", full_page=True)
                     return "manual", "已進入可續期窗口，需人手撳（watchdog 預期訊號）", ""
                 status_text = (not_yet_btn.first.inner_text().strip()
@@ -489,8 +516,9 @@ def run(raw_cookie: str):
                       f" | 面板日期: {old_dates[:3]}")
                 if days.isdigit() and int(days) <= 5:
                     urgent = int(days) <= 3
-                    reason = f"仲有 {days} 日" + ("，要人手撳" if urgent else "")
-                    tg_send(build_tg("skip", f"未可續（{reason}）",
+                    # 窗口**还没开**，页面上没有可点的按钮 —— 别写「要人手撳」，
+                    # 只升到「續期窗口即將開啟」当预备提醒（human=urgent）。
+                    tg_send(build_tg("skip", f"未可續（仲有 {days} 日）",
                                      key=key, human=urgent))
                 else:
                     # 剩 >5 天**故意静默**：每天一条「还早」就是噪音。
@@ -593,7 +621,10 @@ def run(raw_cookie: str):
                 print(f"🔒【暂不可续期】倒计时状态: 【{status_text}】")
                 # 静默：倒计时 > 2 天不发 TG；剩 0-2 天先提醒（就快到期要手动留意）
                 if days.isdigit() and int(days) <= 2:
-                    tg_send(build_tg("skip", f"未可續（仲有 {days} 日，下次自動續）"))
+                    # note= 把那句安抚带进第二行 —— 修复前它被正则吞掉，
+                    # 用户只看到「未到續期窗口」+「剩 1 日」，比不说更慌。
+                    tg_send(build_tg("skip", f"未可續（仲有 {days} 日）",
+                                     note="下次自動續"))
                 else:
                     print(f"ℹ️ 剩 {days} 天（>2），按約定靜默，不發 TG")
                 return "skip", f"未到續期窗口（仲有 {days} 日）", ""

@@ -617,11 +617,31 @@ def section_a(c: Checks, mod) -> None:
     c.eq("A11b skip 的第二行默认说未到窗口", _skip.splitlines()[1],
          "ℹ️ 未到續期窗口")
 
-    _skip_key = mod.build_tg("skip", "未可續（要人手撳）", key="面板 10-31", human=True)
-    c.eq("A12 skip + key + human 的第一行", _skip_key.splitlines()[0],
-         "🟢 FridayDev · 狀態良好")
-    c.eq("A12b skip + key + human 的第二行",
-         _skip_key.splitlines()[1], "ℹ️ 面板 10-31 到期 · 續期窗口即將開啟")
+    _skip_open = mod.build_tg("skip", "", key="面板 10-31", open_now=True)
+    c.eq("A12 窗口已开：抬头换成 🔔 續期窗口已開", _skip_open.splitlines()[0],
+         "🔔 FridayDev · 續期窗口已開")
+    c.eq("A12b 窗口已开：第二行点名要人手撳",
+         _skip_open.splitlines()[1],
+         "ℹ️ 面板 10-31 到期 · 請人手撳「Renouveler gratuitement」")
+    c.check("A12c 窗口已开那条**不再**出现「狀態良好」/「即將開啟」",
+            "狀態良好" not in _skip_open and "即將開啟" not in _skip_open,
+            _skip_open)
+
+    _skip_app = mod.build_tg("skip", "未可續（仲有 2 日）", key="面板 10-31",
+                             human=True)
+    c.eq("A12d 窗口将开（human）：抬头仍是 🟢 + 天数",
+         _skip_app.splitlines()[0], "🟢 FridayDev · 狀態良好（剩 2 日）")
+    c.eq("A12e 窗口将开（human）：第二行升到「即將開啟」",
+         _skip_app.splitlines()[1], "ℹ️ 面板 10-31 到期 · 續期窗口即將開啟")
+
+    c.eq("A12f note 顶替默认的「未到續期窗口」",
+         mod.build_tg("skip", "未可續（仲有 1 日）",
+                      note="下次自動續").splitlines()[1],
+         "ℹ️ 下次自動續")
+    c.check("A12g open_now 优先级高于 human（不会两边都写）",
+            mod.build_tg("skip", "", key="面板 10-31",
+                         human=True, open_now=True) == _skip_open,
+            mod.build_tg("skip", "", key="面板 10-31", human=True, open_now=True))
 
     c.eq("A13 key 里已经带「到期」就不再加",
          mod.build_tg("skip", "", key="面板 10-31 到期").splitlines()[1],
@@ -689,14 +709,10 @@ def section_b(c: Checks, mod) -> None:
     c.check("B3b 日志说「可續期窗口已開」且「唔會自動撳」",
             "可續期窗口已開" in out and "唔會自動撳" in out, out[-400:])
     c.eq("B3c 发一条 TG", len(sent), 1)
-    # ⚠️ 已知文案缺陷，本次迁移**刻意原样保留**（要改就是另一次单独的改动）：
-    #   窗口明明已经开了，第一行却说「狀態良好」、第二行说「即將開啟」；
-    #   而且 run() 传进来的 detail「未可續（要人手撳）」被 build_tg 整个丢掉
-    #   （它只从 detail 里正则抽「仲有 X 日」，抽不到就什么都不写）。
-    #   看通知的人很容易当成「一切正常」直接划走 —— 真正起作用的提醒其实是
-    #   job 标红本身。历史行为如此，这里只钉住它、不趁机改文案。
-    c.eq("B3d 进窗口的完整文案（原样保留，含上述缺陷）", sent[0],
-         "🟢 FridayDev · 狀態良好\nℹ️ 面板 10-31 到期 · 續期窗口即將開啟")
+    # 文案修复后的样子（原缺陷：说「狀態良好 / 即將開啟」，用户划走，服务器到期被删）
+    c.eq("B3d 进窗口的完整文案（🔔 抬头 + 明写要手点）", sent[0],
+         "🔔 FridayDev · 續期窗口已開\n"
+         "ℹ️ 面板 10-31 到期 · 請人手撳「Renouveler gratuitement」")
     c.check("B3e TG 里带面板日期（从 body 文本捞出来的）",
             "10-31" in sent[0], sent[0][:160])
     c.check("B3f 进入窗口才报红 —— 没有别的错误", code == 1 and len(sent) == 1)
@@ -716,9 +732,10 @@ def section_b(c: Checks, mod) -> None:
     c.eq("B5  剩 2 天 -> exit 0", code, 0)
     c.check("B5b 剩 2 天升级成「續期窗口即將開啟」",
             "續期窗口即將開啟" in sent[0], sent[0][:200])
-    # 同 B3d 的缺陷：`run()` 传的是 detail="未可續（仲有 2 日，要人手撳）"，
-    # build_tg 只抽走了「仲有 2 日」，后半句「要人手撳」不见了。原样保留。
-    c.eq("B5c 剩 2 天的完整文案（原样保留）", sent[0],
+    # 窗口**没开**（renewable=False），所以这条只升到「即將開啟」——
+    # 不能跟 B3d 那样叫人去撳，页面上这会儿没有按钮。修复前 detail 里那句
+    # 「要人手撳」被正则吞掉，现在连传都不传了（那句话本身就是错的）。
+    c.eq("B5c 剩 2 天的完整文案（预备提醒，不叫人点）", sent[0],
          "🟢 FridayDev · 狀態良好（剩 2 日）\nℹ️ 續期窗口即將開啟")
 
     # B6 watchdog + 剩 10 天 → 完全静默（一条都不发）
@@ -825,10 +842,10 @@ def section_b(c: Checks, mod) -> None:
         state={"initial_text": GOOD_BODY, "renewable": False, "days": 1})
     c.eq("B14 renew + 只剩 1 天倒计时 -> exit 0", code, 0)
     c.eq("B14b 剩 1 天（≤2）会提醒", len(sent), 1)
-    # 又是同一个缺陷（见 B3d）：`run()` 传的是「未可續（仲有 1 日，下次自動續）」，
-    # build_tg 只留下「仲有 1 日」，「下次自動續」这句安抚的话没进通知。
-    c.eq("B14c 剩 1 天的完整文案（原样保留）", sent[0],
-         "🟢 FridayDev · 狀態良好（剩 1 日）\nℹ️ 未到續期窗口")
+    # 修复前：「下次自動續」被正则吞掉，用户只看到「剩 1 日」+「未到續期窗口」，
+    # 比不说更慌。现在用 note= 带进第二行。
+    c.eq("B14c 剩 1 天的完整文案（带上「下次自動續」）", sent[0],
+         "🟢 FridayDev · 狀態良好（剩 1 日）\nℹ️ 下次自動續")
 
     code, out, sent, _ = run_main(
         mod, mode="renew",
@@ -889,8 +906,11 @@ def section_b(c: Checks, mod) -> None:
             mod, patch_notify=False, dry_run=True,
             state={"initial_text": GOOD_BODY, "renewable": True})
         c.eq("B18 DRY_RUN 下 exit 码不变（演练不改结论）", code, 1)
+        # 这个场景是「窗口已开」，抬头现在是 🔔（修复前是 🟢）。
+        # 关键不是抬头长啥样，是**正文只回显一遍**：脚本自己 print 一次
+        # 加 kit 回显一次就是两遍 —— 1ifecycle 那边踩过。
         c.check("B18b DRY_RUN 下正文只出现一次",
-                out.count("🟢 FridayDev · 狀態良好") == 1, out[-500:])
+                out.count("FridayDev · 續期窗口已開") == 1, out[-500:])
         c.check("B18c DRY_RUN 下带演练抬头", "DRY_RUN 演练" in out, out[-400:])
         c.check("B18d 没 token 也照样演练（闸门排在 token 检查前面）",
                 "未配置" in out, out[-400:])
