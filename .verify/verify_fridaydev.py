@@ -306,9 +306,14 @@ class FakePage:
                 text=self.state.get("renew_text", "Renouveler gratuitement"))
         if s.startswith("text=/") and "Renouvelable dans" in s:
             days = self.state.get("days")
+            # 站方文案是 `Renouvelable dans 3 jour(s)` —— 带那个 `(s)`。
+            # 脚本用 r"Renouvelable dans (\d+) jour" 抽天数，加不加 `(s)` 都匹配，
+            # 但假面板要跟真实页面一致，否则以后有人把正则收紧成 `jour\b`
+            # 就会在真环境绿、在这里红（或者反过来）。
+            # 证据：fridaydev run #29（2026-10-02）的日志。
             return FakeLocator(
                 self, 0 if days is None else 1, sel=s,
-                text=f"Renouvelable dans {days} jour")
+                text=f"Renouvelable dans {days} jour(s)")
         return FakeLocator(self, 0, sel=s)
 
 
