@@ -1,5 +1,13 @@
 name: Auto Renew FridayDev Service
 
+# 2026-10-02：改用 renew-kit 的 composite action（依赖安装 / renewkit 注入 /
+# 失败兜底统一走公共骨架）。脚本本身同日迁到 renewkit，退出码从 0/1/2/3
+# 收敛成 0/1 —— 见 renew.py 顶註。
+#
+# 模式说明（原样保留）：
+#   watchdog（默認）= 只讀狀態 + 到期前 TG 提醒，唔撳任何嘢。
+#   renew         = 真係試自動續期。GHA runner IP 過唔到 Turnstile，預期紅。
+
 on:
   workflow_dispatch:
     inputs:
@@ -11,49 +19,67 @@ on:
         options:
           - watchdog
           - renew
+      dry_run:
+        description: '只檢查不發 TG（用來驗證流程與文案）'
+        type: boolean
+        default: false
   schedule:
     # 每日北京 15:05（UTC 07:05）—— 只做「到期提醒守門」：讀倒計時、剩 ≤5 日開始 TG 提人
     # 2026-09-24 起唔再自動撳續期（Turnstile 喺 runner IP 實測過唔到），詳見 renew.py 頂註
     - cron: '5 7 * * *'
 
-permissions:
-  actions: write
+# 原来这里写着 `permissions: actions: write`，但本仓库没有任何一步调 GitHub API
+# （既不做 cron 回写，也没有清理运行记录）—— 那是一条没人用的额外授权，
+# 第三方 action 也能继承。删掉，只留 checkout 需要的默认 contents: read。
 
 jobs:
   renew:
+    name: FridayDev 續期守門
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout repository
+      - name: 检出代码
         uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: '3.10'
-
-      - name: Install dependencies
-        run: |
-          pip install playwright patchright
-          playwright install chromium
-          playwright install-deps chromium
-          # patchright 自帶 Chromium（唔會同 playwright 撞），ARM 失敗會自己報錯
-          python -m patchright install chromium || echo '[WARN] patchright chromium 裝唔到，會退回 playwright'
-
-      - name: Run Auto Renew Script
+      - name: 运行续期脚本（renew-kit）
+        uses: jardanlau2020/renew-kit/.github/actions/renew@v0.5.3
         env:
           COOKIE: ${{ secrets.COOKIE }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          # 默認 watchdog；只有人手 dispatch 揀 mode=renew 先會真撳續期
-          FD_MODE: ${{ github.event.inputs.mode || 'watchdog' }}
-        run: |
-          python renew.py
-
-      - name: Upload Screenshot Artifact
-        if: always()
-        uses: actions/upload-artifact@v7
+          # 默認 watchdog；只有人手 dispatch 揀 mode=renew 先會真撳續期。
+          # 排程觸發時 inputs 為空 → 空串 → 落到 'watchdog'。
+          FD_MODE: ${{ inputs.mode || 'watchdog' }}
+          # 演练开关：renewkit.notify.send 里唯一的闸门，设了就只打印不发。
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
         with:
-          name: execution-screenshot
+          script: renew.py
+          python-version: "3.10"
+          renewkit-ref: v0.5.3
+          pip-packages: playwright patchright
+          # 浏览器安装放这里，跟迁移前逐条对齐：
+          #   · playwright install chromium        —— 主引擎
+          #   · playwright install-deps chromium   —— 系统库（内部自己 sudo）
+          #   · patchright 自帶 Chromium（唔會同 playwright 撞），ARM 失敗會自己報錯
+          # setup-continue-on-error 设 false：迁移前这几条失败就是硬失败，
+          # 不改成软失败（软失败只会把问题推迟到脚本里，报错更难读）。
+          setup-command: |
+            playwright install chromium
+            playwright install-deps chromium
+            python -m patchright install chromium || echo '[WARN] patchright chromium 裝唔到，會退回 playwright'
+          setup-continue-on-error: "false"
+          # 关掉 action 的兜底通知：脚本对每种结局（cookie 失效 / 点唔到按钮 /
+          # API 未回 success / 未捕获异常）都已经自己发过 TG，兜底那条会重复。
+          notify-on-failure: "false"
+          # 产物上传不用 action 的（它只在 failure() 时传）；本仓库迁移前是
+          # `if: always()`，见下面单独那步。
+
+      - name: 上传截图产物
+        # 迁移前就是 always()：成功那次的截图同样有参考价值（比如看「未到窗口」
+        # 时面板到底长什么样）。所以不走 action 的失败才传。
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fridaydev-screenshot
           path: result.png
           if-no-files-found: ignore
