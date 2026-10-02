@@ -24,8 +24,14 @@ on:
         type: boolean
         default: false
   schedule:
-    # 每日北京 15:05（UTC 07:05）—— 只做「到期提醒守門」：讀倒計時、剩 ≤5 日開始 TG 提人
+    # 每日「到期提醒守門」：讀倒計時、剩 ≤5 日開始 TG 提人。
     # 2026-09-24 起唔再自動撳續期（Turnstile 喺 runner IP 實測過唔到），詳見 renew.py 頂註
+    #
+    # cron 写的是 UTC 07:05（北京 15:05），但**别指望这个时间**：
+    # GitHub 的 schedule 触发器是 best-effort，免费 runner 上会排队。
+    # 实测落地时间（run #21–#31）全在 UTC 12:40–15:19，即北京 20:40–23:19，
+    # 迟 5.5–8 小时，偶尔更晚。反正 watchdog 只提醒、不续期，晚到无害；
+    # 真要它落在某个钟点，得把 cron 往前挪几小时来补偿。
     - cron: '5 7 * * *'
 
 # 原来这里写着 `permissions: actions: write`，但本仓库没有任何一步调 GitHub API
