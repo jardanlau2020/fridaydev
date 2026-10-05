@@ -670,16 +670,32 @@ def run(raw_cookie: str):
                                      note="下次自動續"))
                 else:
                     print(f"ℹ️ 剩 {days} 天（>2），按約定靜默，不發 TG")
+                # 2026-10-06：renew 模式呢個出口原本**漏咗截圖**（watchdog 出口
+                # renew.py:571 同 fail 出口 :655 都有），結果 run 37348520733
+                # 冇 artifact 可上傳，而 finally 嗰行仲報「已保存」。
+                # Turnstile 排障全靠呢張圖，補返。
+                page.screenshot(path="result.png", full_page=True)
                 return "skip", f"未到續期窗口（仲有 {days} 日）", ""
 
             else:
                 print("ℹ️ 未发现续期按钮，当前可能已成功续期。")
+                page.screenshot(path="result.png", full_page=True)
                 return "skip", "未發現續期按鈕（可能已續期）", ""
 
+        # ── 收尾截圖（2026-10-06 修）────────────────────────────────────────
+        # 原本 finally 第一句係**無條件 print「截图已保存至 result.png」**，但
+        # renew 模式嗰兩個 skip 出口根本冇截圖，於 run 37348520733 出現「日誌話
+        # 存咗 / artifact upload 話搵唔到」嘅自相矛盾。改成收尾真補截一次 +
+        # 老實報結果（唔準 os —— harness C3b 釘死「不再 import os」）。
+        # ⚠️ harness C5 要求 finally: 之後**最多 6 行**就到 browser.close()
+        #    （防止關唔到瀏覽器嘅安全網），所以下面嗰段只能咁緊密；
+        #    註釋必須放喺 finally 之前 —— 註釋行一樣計數。
         finally:
-            # 关闭收敛到 finally：原来 5 条出口里 3 条靠 sys.exit 前的显式 close，
-            # 漏一条就是浏览器进程泄漏。
-            print("📸 最终截图已保存至 result.png")
+            try:
+                page.screenshot(path="result.png", full_page=True)
+                print("📸 截图已存 result.png")
+            except Exception:
+                print("⚠️ 收尾截图失败，本輪冇 artifact 可上傳")
             try:
                 browser.close()
             except Exception:
