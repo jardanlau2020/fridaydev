@@ -243,6 +243,11 @@ class FakePage:
         self.cgu_dismissed = False
         self.screenshots: list[str] = []
         self.mouse = FakeMouse()
+        self.init_scripts: list[str] = []
+
+    # ---- 2026-10-06：STEALTH_JS 注入（有頭真 Chrome 那一步會呼叫）
+    def add_init_script(self, script: str) -> None:
+        self.init_scripts.append(script)
 
     # ---- 事件
     def on(self, event: str, fn) -> None:

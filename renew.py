@@ -71,6 +71,38 @@ SERVICE = "FridayDev"
 PANEL_URL = "https://fridaydev.fr/services/"
 PANEL_TARGET = "FridayDev 服務"
 
+# ── 2026-10-06：headless → 有頭 + 真 Chrome（HidenCloud 10-05 嗰單同款配方）──────
+# 硬證據 run 35510050597：428 已攞到 captcha_site_key，但頁內 window.turnstile
+# 全程 undefined、iframes=[] —— Turnstile 喺 headless Chromium 拒絕渲染
+# （error-callback「Le test a échoué」，71 秒後 token 未到手）。
+# HidenCloud 用 xvfb + channel="chrome" + headless=False 喺同一個 GHA runner IP 過到；
+# 我哋 09-24「5 引擎全敗」嘅結論係喺 headless=True 下得出，從未試過有頭真 Chrome。
+# 預設有頭（workflow 用 xvfb-run 提供 DISPLAY）；要無頭先設 FD_HEADLESS=true。
+# 讀環境變量走 renewkit.env.get（規程：別直接摸 os.environ，os 已被清走）。
+HEADLESS = (env.get("FD_HEADLESS") or "false").strip().lower() in ("1", "true", "yes")
+
+STEALTH_JS = """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+window.chrome = window.chrome || {};
+window.chrome.runtime = window.chrome.runtime || {};
+window.chrome.loadTimes = window.chrome.loadTimes || function () { return {}; };
+window.chrome.csi = window.chrome.csi || function () { return {}; };
+if (!window.chrome.app) {
+  window.chrome.app = { isInstalled: false,
+    InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+    RunningState: { CANT_RUN: 'cannot_run', UNINSTALLED: 'uninstalled', RUNNING: 'running' } };
+}
+try {
+  const origQuery = window.navigator.permissions && window.navigator.permissions.query;
+  if (origQuery) {
+    window.navigator.permissions.query = (p) =>
+      (p && p.name === 'notifications')
+        ? Promise.resolve({ state: (window.Notification && Notification.permission) || 'prompt' })
+        : origQuery(p);
+  }
+} catch (e) {}
+"""
+
 # ── 状态字 → renewkit 结果语义 ───────────────────────────────────────────
 #   · ok      -> RENEWED  本次确实续上了
 #   · skip    -> SKIPPED  未到窗口 / watchdog 正常读数为「还早」
@@ -402,22 +434,33 @@ def run(raw_cookie: str):
     cookies = parse_cookies(raw_cookie)
 
     with sync_playwright() as p:
-        print("🚀 启动无头浏览器...")
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox",
-                  "--disable-blink-features=AutomationControlled"]
-        )
+        print(f"🚀 启动浏览器：{'headless' if HEADLESS else '有頭（xvfb）+ 真 Chrome'} …", flush=True)
+        args = ["--no-sandbox", "--disable-setuid-sandbox",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars", "--window-size=1920,1080"]
+        # 真 Chrome 優先（Turnstile 對 chromium headless 拒絕渲染）；
+        # 起唔到就退回 chromium，但**保持有頭**，唔好靜默變返 headless。
+        browser = None
+        if not HEADLESS:
+            try:
+                browser = p.chromium.launch(channel="chrome", headless=False, args=args)
+                print("[INFO] 引擎 = 真 Chrome（channel=chrome, headless=False）", flush=True)
+            except Exception as e:
+                print(f"[WARN] 真 Chrome 起唔到（{str(e)[:160]}），退回 chromium", flush=True)
+        if browser is None:
+            browser = p.chromium.launch(headless=HEADLESS, args=args)
+            print(f"[INFO] 引擎 = chromium headless={HEADLESS}", flush=True)
         try:
             context = browser.new_context(
                 user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                             "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/120.0.0.0 Safari/537.36"),
+                            "Chrome/143.0.0.0 Safari/537.36"),
                 viewport={"width": 1920, "height": 1080}
             )
 
             context.add_cookies(cookies)
             page = context.new_page()
+            page.add_init_script(STEALTH_JS)
 
             # ── 監聽續期 API 同 alert（2026-09-20）：之前冇監聽，428/alert 全部走漏，
             #    所以「按鈕點完冇反應」被誤報成「續期成功」。──

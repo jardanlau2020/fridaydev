@@ -58,21 +58,35 @@ jobs:
           FD_MODE: ${{ inputs.mode || 'watchdog' }}
           # 演练开关：renewkit.notify.send 里唯一的闸门，设了就只打印不发。
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          # 有頭用嘅虛擬顯示（xvfb-run --server-num=99 同呢個數字對齊）。
+          # 規程：起咗 Xvfb 但冇 DISPLAY = 白起。
+          DISPLAY: ':99'
         with:
           script: renew.py
           python-version: "3.10"
           renewkit-ref: v0.5.3
           pip-packages: playwright patchright
+          # Xvfb：Turnstile 喺 headless Chromium 拒絕渲染（run 35510050597：
+          # window.turnstile 全程 undefined、iframes=[]），要用有頭先會 render。
+          apt-packages: xvfb
+          # 用 xvfb-run 包住跑 → DISPLAY 由佢設定，配合 env DISPLAY=:99。
+          # 對齊 HidenCloud 10-05 嗰單成功配方（xvfb + 真 Chrome + headed）。
+          command: xvfb-run --server-num=99 -s "-screen 0 1920x1080x24" python -u renew.py
           # 浏览器安装放这里，跟迁移前逐条对齐：
           #   · playwright install chromium        —— 主引擎
           #   · playwright install-deps chromium   —— 系统库（内部自己 sudo）
           #   · patchright 自帶 Chromium（唔會同 playwright 撞），ARM 失敗會自己報錯
+          #   · 真 Chrome（channel="chrome"）—— ubuntu-latest 預裝；冇就要講俾我哋知，
+          #     否則腳本會靜默退回 chromium，「有頭真 Chrome」呢半邊就白做。
           # setup-continue-on-error 设 false：迁移前这几条失败就是硬失败，
           # 不改成软失败（软失败只会把问题推迟到脚本里，报错更难读）。
           setup-command: |
             playwright install chromium
             playwright install-deps chromium
             python -m patchright install chromium || echo '[WARN] patchright chromium 裝唔到，會退回 playwright'
+            echo "── 真 Chrome 檢查（channel=chrome 要用）──"
+            google-chrome --version || google-chrome-stable --version || echo "[ERROR] runner 冇真 Chrome，會退回 chromium"
+            command -v xvfb-run && xvfb-run --help 2>&1 | head -2
           setup-continue-on-error: "false"
           # 关掉 action 的兜底通知：脚本对每种结局（cookie 失效 / 点唔到按钮 /
           # API 未回 success / 未捕获异常）都已经自己发过 TG，兜底那条会重复。
