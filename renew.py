@@ -243,10 +243,12 @@ def parse_cookies(raw: str) -> list[dict]:
 
 
 def current_mode() -> str:
-    """FD_MODE，默认 watchdog。
+    """FD_MODE。workflow **默认会传 renew**（2026-10-06 起全自動）；
+    只有裸跑 `python renew.py` 乜都唔設先落回 watchdog —— 呢個係本地安全網，
+    保證手動試跑唔會一嚟就撳續期。
 
     读环境变量走 renewkit.env.get（会自动 strip）；别直接摸 os.environ ——
-    workflow 里 `${{ inputs.mode || 'watchdog' }}` 求值成空串时，裸
+    workflow 里 `${{ inputs.mode || 'renew' }}` 求值成空串时，裸
     os.environ.get 拿到的是 "" 而不是默认值。
     """
     return (env.get("FD_MODE", "watchdog") or "watchdog").strip().lower()

@@ -1052,8 +1052,11 @@ def section_c(c: Checks, src: str, code: str) -> None:
         c.check("C11j 传 COOKIE", "COOKIE: ${{ secrets.COOKIE }}" in wf)
         c.check("C11k 传 TG_BOT_TOKEN", "TG_BOT_TOKEN:" in wf)
         c.check("C11l 传 TG_CHAT_ID", "TG_CHAT_ID:" in wf)
-        c.check("C11m FD_MODE 默认 watchdog",
-                re.search(r"FD_MODE:\s*\$\{\{\s*inputs\.mode \|\| 'watchdog'\s*\}\}", wf)
+        # 2026-10-06：默認由 watchdog 改 renew（用戶拍板「改做 renew → 全自動」）。
+        # 改之前，這裡釘死 `inputs.mode || 'watchdog'` 十幾日；改之後要釘返轉頭，
+        # 免得日後有人「順手」改返做 watchdog 而冇人發現自動化靜默失效。
+        c.check("C11m FD_MODE 默认 renew（2026-10-06 起全自動）",
+                re.search(r"FD_MODE:\s*\$\{\{\s*inputs\.mode \|\| 'renew'\s*\}\}", wf)
                 is not None)
         c.check("C11n 有 dry_run 输入接到 DRY_RUN",
                 "DRY_RUN: ${{ inputs.dry_run" in wf)

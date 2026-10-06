@@ -1,16 +1,16 @@
 # fridaydev
 
-FridayDev（fridaydev.fr）免费服务自动续期 —— **watchdog 模式**。
+FridayDev（fridaydev.fr）免费服务自动续期 —— **全自動 `renew` 模式**（2026-10-06 起）。
 
-每日跑一次（`cron: '5 7 * * *'`，即 UTC 07:05 / 北京 15:05）：只读面板上的续期
-倒计时，剩 ≤5 天开始用 Telegram 提醒人去手点。**不自动点击**。
+每日跑一次（`cron: '5 7 * * *'`，即 UTC 07:05 / 北京 15:05）：页面有续期按钮就点，
+未到可续窗口就 skip（**不点**）。续期成功、或剩 ≤2 天仍未可续，都会发 Telegram。
 
 > ⚠️ 上面那个钟点**只是 cron 里写的**。GitHub 的 `schedule` 触发器是 best-effort，
 > 免费 runner 上会排队 —— 实测（run #21–#31）落地时间全在 UTC 12:40–15:19
-> （北京 20:40–23:19），迟 5.5–8 小时，偶尔更晚。watchdog 只提醒不续期，晚到
-> 无害；但如果你要它落在某个具体钟点，得把 cron 往前挪几小时补偿。
+> （北京 20:40–23:19），迟 5.5–8 小时，偶尔更晚。可续窗口跨越多日而每日都跑
+> 一次，晚到无害；但如果你要它落在某个具体钟点，得把 cron 往前挪几小时补偿。
 
-## 为什么默认不自动续期
+## 为什么以前默认不自动续期（以及 2026-10-06 改了什么）
 
 站点对免费续期强制 Cloudflare **Turnstile 互动验证**（`/php/renew_free_service.php`
 返回 HTTP 428 + `captcha_required`，前端用 `window.fdCaptchaSolve()` render widget）。
@@ -26,6 +26,27 @@ FridayDev（fridaydev.fr）免费服务自动续期 —— **watchdog 模式**�
 结论（2026-09-24）：继续每日自动点只会制造红灯和假信号，降级为 watchdog。
 想再试就手动 dispatch 并选 `mode=renew`。
 
+### 2026-10-06：改回全自動 renew
+
+新证据（run `35510050597` 原始 log）：上面那批「5 引擎全败」的测试**全部跑在
+`headless=True` 下** —— 428 已经拿到 captcha_site_key，但页面里
+`window.turnstile` 全程 `undefined`、`iframes=[]`，即 widget **根本没渲染**，
+不是网络被拒。换成 HidenCloud（10-05 在同一台 GHA runner 成功过闸）的配方：
+
+- `xvfb-run --server-num=99` 提供真显示（`DISPLAY=:99`）
+- `channel="chrome"` 起**真 Chrome**（起不到就退回 chromium，但保持有头，不静默变回 headless）
+- `headless=False` + `STEALTH_JS`
+
+实测（run `37348520733` / `37350294906`，均 success）：
+`[INFO] 引擎 = 真 Chrome（channel=chrome, headless=False）` → Cookie 有效 →
+面板读取正常。用户拍板「改做 renew → 全自動」，`FD_MODE` 默认改 `renew`。
+
+> ⚠️ **Turnstile 仍未被真正触发过。** 上面两单跑的时候面板显示
+> `Renouvelable dans 3 jour(s)`、没有续期按钮，脚本按设计 skip 了。
+> 首次真实验证要等可续窗口开（下次 **2026-10-08**）。在那之前，「有头能过
+> Turnstile」只是合理推断加上 HidenCloud 先例，**还不是本仓的实证** ——
+> 别把它当成已解决。
+
 > 引擎首选 **patchright**（undetected Playwright）。证据：weirdhost 探针
 > run 35501369694 —— 同一段点击代码，普通 playwright 点完 71 秒无反应，
 > patchright 一点即有 `cf_clearance`。指纹差异就是 CF 认不认你。
@@ -34,9 +55,10 @@ FridayDev（fridaydev.fr）免费服务自动续期 —— **watchdog 模式**�
 
 | 模式 | 触发 | 行为 | 退出码 |
 |---|---|---|---|
-| `watchdog`（默认） | schedule / dispatch | 只读倒计时，剩 ≤5 天发 TG | 未到窗口 0；**进入窗口 1**（提醒你去点） |
-| `renew` | 仅手动 dispatch | 真点续期按钮（预期失败） | 成功 0；失败 1 |
+| `renew`（默认，2026-10-06 起） | schedule / dispatch | 有续期按钮才点，未到窗口 skip | 成功 0；失败 1 |
+| `watchdog` | 仅手动 dispatch 揀 | 只读倒计时，剩 ≤5 天发 TG | 未到窗口 0；**进入窗口 1**（提醒你去点） |
 
+`renew` 的静默约定：未到窗口且倒计时 **>2 天**一条消息都不发；剩 ≤2 天才出声。
 `watchdog` 的静默约定：倒计时 **>5 天**一条消息都不发。天天收「还早」就是噪音，
 看久了就会开始忽略 —— 那提醒就废了。剩 ≤3 天时第二行会从「未到續期窗口」
 升级成「續期窗口即將開啟」。
@@ -116,7 +138,7 @@ uses: jardanlau2020/renew-kit/.github/actions/renew@v0.5.3
 
 ```
 Actions → Auto Renew FridayDev Service → Run workflow
-  mode:    watchdog（默认，只读） / renew（真点，预期红）
+  mode:    renew（默认，真点续期） / watchdog（只读，不点）
   dry_run: true  → 只检查、不发 TG（用来验证流程与文案）
 ```
 
