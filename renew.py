@@ -534,14 +534,22 @@ def run(raw_cookie: str):
             # 所以讀之前一定要等。
             # 「RENOUVELLEMENT」係卡片必有嘅欄位名、「Accéder」係必有嘅按鈕，
             # 任一出現即代表卡出咗。
+            # 20s → 40s：37409013025 顯示「20s 內未見」但緊接就讀到日期同
+            # 倒計時，即係卡片喺第 20 秒附近先出 —— 等短咗。
             try:
                 page.locator(
                     "text=/RENOUVELLEMENT|Renouveler|Renouvelable dans|Accéder/i"
-                ).first.wait_for(state="visible", timeout=20000)
+                ).first.wait_for(state="visible", timeout=40000)
                 print("✅ 服務卡已渲染")
             except Exception:
-                print("ℹ️ 20s 內未見服務卡嘅欄位／按鈕 —— 可能真係冇，"
-                      "後面按現有邏輯處理（唔當成功）")
+                # 逾時必須講清楚**此刻**有冇嘢 —— 否則日誌分唔開「selector 啱、
+                # 只係 render 慢」同「selector 根本冇人認」兩種情況，而呢兩種
+                # 嘅補救方法完全唔同（前者加長等待 / 後者改 selector）。
+                print("ℹ️ 40s 內未見服務卡 —— 即時探測："
+                      f"Renouvelable={page.locator('text=Renouvelable dans').count()} "
+                      f"RENOUVELLEMENT={page.locator('text=RENOUVELLEMENT').count()} "
+                      "（有數＝只係慢；兩個都 0＝真係未出，"
+                      "後面按冇嘢處理、唔當成功）")
 
             old_dates = extract_dates(page)
             print(f"📅 当前页面检测到日期: {old_dates}")
