@@ -532,20 +532,25 @@ def run(raw_cookie: str):
             # 個 → 跌落「未發現按鈕＝可能已續期」嘅 skip。全自動模式下咁樣會
             # **靜靜錯過可續窗口**（run 37348520733 起 schedule 已改 renew），
             # 所以讀之前一定要等。
-            # 「RENOUVELLEMENT」係卡片必有嘅欄位名、「Accéder」係必有嘅按鈕，
-            # 任一出現即代表卡出咗。
-            # 20s → 40s：37409013025 顯示「20s 內未見」但緊接就讀到日期同
-            # 倒計時，即係卡片喺第 20 秒附近先出 —— 等短咗。
+            # 探針結論（run 37409359699）：等待逾時嘅當刻，
+            #   text=Renouvelable dans → 1、text=RENOUVELLEMENT → 2
+            # 即係元素**一直喺度**，問題唔係 render 慢，而係我最初寫嘅
+            #   page.locator("text=/…|…/i").first.wait_for(state="visible")
+            # —— regex union 嗰個 selector 嘅 .first 揞中咗個隱藏元素，
+            # state="visible" 於是永遠等唔到。避開成套 selector 引擎彎角，
+            # 直接對 innerText 做 regex：慢嗰陣等到、渲染咗就即刻過。
             try:
-                page.locator(
-                    "text=/RENOUVELLEMENT|Renouveler|Renouvelable dans|Accéder/i"
-                ).first.wait_for(state="visible", timeout=40000)
+                page.wait_for_function(
+                    "() => { try {"
+                    "  return /RENOUVELLEMENT|Renouvelable dans|Accéder/i"
+                    "         .test(document.body.innerText);"
+                    "} catch (e) { return false; } }",
+                    timeout=40000)
                 print("✅ 服務卡已渲染")
             except Exception:
-                # 逾時必須講清楚**此刻**有冇嘢 —— 否則日誌分唔開「selector 啱、
-                # 只係 render 慢」同「selector 根本冇人認」兩種情況，而呢兩種
-                # 嘅補救方法完全唔同（前者加長等待 / 後者改 selector）。
-                print("ℹ️ 40s 內未見服務卡 —— 即時探測："
+                # 逾時必須講清楚**此刻**有冇嘢 —— 否則日誌分唔開「只係 render
+                # 慢」同「selector 根本冇人認」兩種情況，而補救方法完全唔同。
+                print("ℹ️ 40s 內未見服務卡文字 —— 即時探測："
                       f"Renouvelable={page.locator('text=Renouvelable dans').count()} "
                       f"RENOUVELLEMENT={page.locator('text=RENOUVELLEMENT').count()} "
                       "（有數＝只係慢；兩個都 0＝真係未出，"
