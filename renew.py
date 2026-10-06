@@ -524,6 +524,25 @@ def run(raw_cookie: str):
             # 关掉/接受 CGU 全屏弹窗（唔关会 intercept pointer events 令续期按钮点唔到）
             dismiss_cgu_modal(page)
 
+            # ── 等服務卡真係渲染出嚟先再读 ────────────────────────────────
+            # 2026-10-06：下面每一條都係**即時查詢**（inner_text("body") 同
+            # .count() 都唔會自動等元素）。卡片未出齊就查會攞到空 —— run
+            # 37408676915 與 37350294906 相隔幾分鐘、面板狀態完全一樣，卻一個
+            # 讀到「Renouvelable dans 3 jour(s)」、另一個日期 [] 兩個按鈕都 0
+            # 個 → 跌落「未發現按鈕＝可能已續期」嘅 skip。全自動模式下咁樣會
+            # **靜靜錯過可續窗口**（run 37348520733 起 schedule 已改 renew），
+            # 所以讀之前一定要等。
+            # 「RENOUVELLEMENT」係卡片必有嘅欄位名、「Accéder」係必有嘅按鈕，
+            # 任一出現即代表卡出咗。
+            try:
+                page.locator(
+                    "text=/RENOUVELLEMENT|Renouveler|Renouvelable dans|Accéder/i"
+                ).first.wait_for(state="visible", timeout=20000)
+                print("✅ 服務卡已渲染")
+            except Exception:
+                print("ℹ️ 20s 內未見服務卡嘅欄位／按鈕 —— 可能真係冇，"
+                      "後面按現有邏輯處理（唔當成功）")
+
             old_dates = extract_dates(page)
             print(f"📅 当前页面检测到日期: {old_dates}")
 
