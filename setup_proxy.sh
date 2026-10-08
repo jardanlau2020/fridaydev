@@ -147,10 +147,21 @@ case "$proto" in
       [ -n "$pbk" ] && outbound_reality_pbk="$pbk"
       sid=$(echo "$query" | grep -o 'sid=[^&]*' | cut -d= -f2)
       [ -n "$sid" ] && outbound_reality_sid="$sid"
+      # 晴天 patch 2026-10-08：alpn 原本只喺 tuic 分支解析，vless 完全冇 →
+      # 要求鎖 http/1.1 嘅節點（ws 走 CF）TLS 通唔到。實證：run 37806041608（SG 328）。
+      alpn_raw=$(echo "$query" | grep -o 'alpn=[^&]*' | cut -d= -f2)
+      if [ -n "$alpn_raw" ]; then
+        outbound_alpn=$(url_decode "$alpn_raw")
+      fi
       ins=$(echo "$query" | grep -o 'insecure=[^&]*' | cut -d= -f2)
       [ "$ins" = "1" ] || [ "$ins" = "true" ] && outbound_insecure="true"
       alins=$(echo "$query" | grep -o 'allowInsecure=[^&]*' | cut -d= -f2)
       [ "$alins" = "1" ] || [ "$alins" = "true" ] && outbound_insecure="true"
+      # 晴天 patch 2026-10-08：trojan 都要解析 alpn（同 vless 一樣嘅理由）
+      alpn_raw=$(echo "$query" | grep -o 'alpn=[^&]*' | cut -d= -f2)
+      if [ -n "$alpn_raw" ]; then
+        outbound_alpn=$(url_decode "$alpn_raw")
+      fi
     fi
     [ -z "$outbound_host" ] && outbound_host="$outbound_server"
     [ -z "$outbound_sni" ] && outbound_sni="$outbound_server"
@@ -411,6 +422,9 @@ case "$outbound_type" in
     tls_enabled="false"
     [ "$outbound_security" = "tls" ] || [ "$outbound_security" = "reality" ] && tls_enabled="true"
     tls_json="{\"enabled\":$tls_enabled,\"server_name\":\"$outbound_sni\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$outbound_fingerprint\"}"
+    if [ -n "$outbound_alpn" ]; then
+      tls_json="$tls_json,\"alpn\":[\"$outbound_alpn\"]"
+    fi
     [ "$outbound_security" = "reality" ] && tls_json="$tls_json,\"reality\":{\"enabled\":true,\"public_key\":\"$outbound_reality_pbk\",\"short_id\":\"$outbound_reality_sid\"}"
     tls_json="$tls_json}"
     jq_outbound="$jq_outbound,\"tls\":$tls_json"
@@ -424,8 +438,18 @@ case "$outbound_type" in
     ;;
   trojan)
     jq_outbound="$jq_outbound,\"password\":\"$outbound_password\""
-    jq_outbound="$jq_outbound,\"transport\":{\"type\":\"$outbound_transport_type\",\"path\":\"$outbound_path\",\"headers\":{\"Host\":\"$outbound_host\"}}"
-    jq_outbound="$jq_outbound,\"tls\":{\"enabled\":true,\"server_name\":\"$outbound_sni\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$outbound_fingerprint\"}}"
+    # 晴天 patch 2026-10-08：原本無條件加 transport，但 URI 寫 type=tcp 時會生成
+    # "transport":{"type":"tcp"}，sing-box 直接 FATAL（unknown transport type: tcp）
+    # —— 同 vless 分支一樣要判 tcp。實證：run 37806402371（trojan SG 556）。
+    if [ "$outbound_transport_type" != "tcp" ]; then
+      jq_outbound="$jq_outbound,\"transport\":{\"type\":\"$outbound_transport_type\",\"path\":\"$outbound_path\",\"headers\":{\"Host\":\"$outbound_host\"}}"
+    fi
+    trojan_tls="{\"enabled\":true,\"server_name\":\"$outbound_sni\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$outbound_fingerprint\"}"
+    if [ -n "$outbound_alpn" ]; then
+      trojan_tls="$trojan_tls,\"alpn\":[\"$outbound_alpn\"]"
+    fi
+    trojan_tls="$trojan_tls}"
+    jq_outbound="$jq_outbound,\"tls\":$trojan_tls"
     ;;
   hysteria2)
     jq_outbound="$jq_outbound,\"up_mbps\":$outbound_up_mbps,\"down_mbps\":$outbound_down_mbps"
