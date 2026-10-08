@@ -129,7 +129,7 @@ jobs:
         # 迁移前就是 always()：成功那次的截图同样有参考价值（比如看「未到窗口」
         # 时面板到底长什么样）。所以不走 action 的失败才传。
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fridaydev-screenshot
           path: result.png
