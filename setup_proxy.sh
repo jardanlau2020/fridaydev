@@ -32,8 +32,13 @@ if [ -x ./sing-box ] && ./sing-box version >/dev/null 2>&1; then
 else
 
 echo "[INFO] 获取 sing-box 最新版本..."
-latest_version=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases" | jq -r '[.[] | select(.prerelease==false)][0].tag_name | sub("^v"; "")')
-if [ -z "$latest_version" ]; then
+# 晴天 patch 2026-10-08：GHA runner 打未認證 GitHub API 常撞 rate limit（60/h/IP），
+# 回嘅係 {"message":"API rate limit exceeded..."} 而唔係陣列 → jq 報
+# "Cannot index string with string \"prerelease\"" 並因 set -e 直接殺死腳本，
+# 連下面嘅 fallback 都去唔到（實證 run 37807287836，白白報「代理起唔到」）。
+# 加 `2>/dev/null || true` 令查唔到就落 fallback 版本。
+latest_version=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases" 2>/dev/null | jq -r '[.[] | select(.prerelease==false)][0].tag_name | sub("^v"; "")' 2>/dev/null || true)
+if [ -z "$latest_version" ] || [ "$latest_version" = "null" ]; then
   echo "[ERROR] 无法获取 sing-box 最新版本,将下载v1.13.16"
   export latest_version=1.13.16
 fi
