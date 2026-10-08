@@ -15,17 +15,27 @@ name: Auto Renew FridayDev Service
 # iframes=[]，即 Turnstile 喺 **headless** Chromium 下根本唔 render。
 # 2026-10-06 改用 xvfb + channel="chrome" + headless=False（HidenCloud 10-05
 # 同款配方），實測引擎起得到、面板讀得到，用戶拍板「改做 renew → 全自動」。
-# ⚠️ 但 Turnstile 本身**仍未被真正觸發過**：10-06 兩單 dispatch 時面板顯示
-#    「Renouvelable dans 3 jour(s)」、冇按鈕，腳本按設計 skip。
-#    首次真驗證要等可續窗口開（下次 2026-10-08）。未證實之前唔好寫「已解決」。
+#
+# ❌ 2026-10-08 窗口真跑：**Turnstile 證實過唔到**（呢個就係等緊嘅答案）。
+#    證據 run 37793164201（排程）＋ 37796323617（移植 frame 樹反查後 dispatch）：
+#      · 窗口確實開住：搵到並撳到「Renouveler gratuitement (5 jours)」
+#      · 引擎齊：patchright + 真 Chrome + headless=False + xvfb（log 有印）
+#      · frame 樹反查成功：[FRAMES] challenge 命中 1，撳到正確 iframe
+#      · 但挑戰本身判敗：`Le test a échoué. Rechargez la page et réessayez.`
+#        token 永遠 0 → API 回 428 captcha_required
+#    判斷：唔係代碼問題，係環境被 Cloudflare 判失敗（唔撳 25 秒無事、一撳
+#    3 秒即敗；兩種撳法皆敗）→ 同 Weirdhost 同一家族。
+#    ⇒ 用戶拍板（2026-10-08）**排程改返 watchdog**：唔再每日發假紅，
+#      剩 ≤2 日先提醒人手上面板撳。renew 模式仍留喺 dispatch inputs。
+#      未解決之前唔好再改返 renew 做默認。
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'renew = 自動續期（默認）；watchdog = 只讀+到期提醒，唔撳任何嘢'
+        description: 'watchdog = 只讀+到期提醒（默認，2026-10-08 起）；renew = 試自動續期（實測 Turnstile 過唔到）'
         required: false
-        default: 'renew'
+        default: 'watchdog'
         type: choice
         options:
           - watchdog
@@ -35,10 +45,10 @@ on:
         type: boolean
         default: false
   schedule:
-    # 每日自動續期（2026-10-06 起）：renew 模式 —— 有續期按鈕就撳，未到窗口
-    # 就 skip 唔撳。通知節奏：續期成功發一條 ok；剩 ≤2 日仍未可續就提你；
-    # >2 日完全靜默。
-    # （2026-09-24 → 2026-10-05 期間係 watchdog，只提醒唔撳，原因見上面頭註。）
+    # 2026-10-08 起：排程 = watchdog（只讀 + 到期提醒，唔撳任何嘢）。
+    # 原因：10-08 窗口真跑證實 Turnstile 過唔到（見頭註），renew 只會製造
+    # 每日假紅。通知節奏：剩 ≤2 日先 TG 提你人手上面板撳；>2 日靜默。
+    # （2026-10-06 → 2026-10-08 期間曾改 renew 全自動，已回退。）
     #
     # cron 写的是 UTC 07:05（北京 15:05），但**别指望这个时间**：
     # GitHub 的 schedule 触发器是 best-effort，免费 runner 上会排队。
@@ -66,10 +76,9 @@ jobs:
           COOKIE: ${{ secrets.COOKIE }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          # 默認 renew（2026-10-06 起全自動）。
-          # 排程觸發時 inputs 為空 → 落到 'renew'，即係每日真試續期；
-          # 要只讀守門先人手 dispatch 揀 mode=watchdog。
-          FD_MODE: ${{ inputs.mode || 'renew' }}
+          # 默認 watchdog（2026-10-08 起）。排程觸發時 inputs 為空 → 落到
+          # 'watchdog'，即只讀 + 到期提醒；要真試續期先人手 dispatch 揀 mode=renew。
+          FD_MODE: ${{ inputs.mode || 'watchdog' }}
           # 演练开关：renewkit.notify.send 里唯一的闸门，设了就只打印不发。
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
           # 有頭用嘅虛擬顯示（xvfb-run --server-num=99 同呢個數字對齊）。

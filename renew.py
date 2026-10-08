@@ -244,8 +244,9 @@ def parse_cookies(raw: str) -> list[dict]:
 
 
 def current_mode() -> str:
-    """FD_MODE。workflow **默认会传 renew**（2026-10-06 起全自動）；
-    只有裸跑 `python renew.py` 乜都唔設先落回 watchdog —— 呢個係本地安全網，
+    """FD_MODE。workflow **默认传 watchdog**（2026-10-08 起回退：10-08 窗口
+    真跑證實 Turnstile 過唔到，renew 只會每日假紅；要真試續期需人手 dispatch
+    mode=renew）。裸跑 `python renew.py` 亦落回 watchdog —— 本地安全網，
     保證手動試跑唔會一嚟就撳續期。
 
     读环境变量走 renewkit.env.get（会自动 strip）；别直接摸 os.environ ——
