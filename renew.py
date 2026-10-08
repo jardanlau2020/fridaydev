@@ -50,6 +50,7 @@
 """
 from __future__ import annotations
 
+import random
 import re
 import sys
 import time
@@ -323,20 +324,171 @@ def dismiss_cgu_modal(page):
         return False
 
 
+# ══════════ Turnstile 定位／點擊（2026-10-08 由 HidenCloud 勝方配方移植）══════════
+# 2026-10-08 run 37793164201（窗口已開、真跑）遙測：
+#   .fd-captcha-widget 容器有 render（378x73），但
+#   `document.querySelectorAll('iframe')` = []、`window.turnstile` = undefined、
+#   token_len 一直 0；一撳就回「Le test a échoué. Rechargez la page et réessayez.」
+# → 同 HidenCloud 當初一模一樣：挑戰 iframe 收喺 **closed shadow DOM**，
+#   任何 DOM 查詢（querySelectorAll／locator）都搵唔到；唯一覆蓋得到嘅方法係行
+#   `page.frames`（瀏覽器層 frame 樹）反查 url 含 challenges.cloudflare.com，
+#   再用 `frame_element()` 攞返元素。
+#   點擊亦要 `el.click(position=…)`（Playwright 會將事件路由入跨進程 iframe），
+#   失敗才退 CDP `Input.dispatchMouseEvent`（isTrusted=true）。
+# 舊版用 `page.locator("iframe[src*=challenges.cloudflare.com]")` → 永遠 count=0，
+# 之後退化成「撳容器座標」，即係撳錯目標 → 站方回「Le test a échoué」。
+_CDP_SESSIONS: dict = {}
+TURNSTILE_FRAME_URL_MARKER = "challenges.cloudflare.com"
+
+
+def get_cdp_session(page):
+    session = _CDP_SESSIONS.get(page)
+    if session is None:
+        try:
+            session = page.context.new_cdp_session(page)
+        except Exception as e:
+            print(f"⚠️ 開 CDP 會話失敗: {e}")
+            return None
+        _CDP_SESSIONS[page] = session
+    return session
+
+
+def reset_cdp_session(page):
+    session = _CDP_SESSIONS.pop(page, None)
+    try:
+        if session is not None:
+            session.detach()
+    except Exception:
+        pass
+
+
+def cdp_click_at(page, x, y):
+    """喺瀏覽器內核層注入真實滑鼠事件（isTrusted=true）"""
+    session = get_cdp_session(page)
+    if not session:
+        return False
+    try:
+        sx = x - random.uniform(50, 110)
+        sy = y - random.uniform(35, 75)
+        steps = random.randint(8, 14)
+        for i in range(1, steps + 1):
+            ix = sx + (x - sx) * i / steps + random.uniform(-1.5, 1.5)
+            iy = sy + (y - sy) * i / steps + random.uniform(-1.5, 1.5)
+            session.send('Input.dispatchMouseEvent', {'type': 'mouseMoved', 'x': ix, 'y': iy})
+            time.sleep(random.uniform(0.01, 0.035))
+        time.sleep(random.uniform(0.1, 0.25))
+        session.send('Input.dispatchMouseEvent', {
+            'type': 'mousePressed', 'x': x, 'y': y,
+            'button': 'left', 'buttons': 1, 'clickCount': 1})
+        time.sleep(random.uniform(0.05, 0.12))
+        session.send('Input.dispatchMouseEvent', {
+            'type': 'mouseReleased', 'x': x, 'y': y,
+            'button': 'left', 'clickCount': 1})
+        return True
+    except Exception as e:
+        print(f"⚠️ CDP 底層點擊失敗: {e}")
+        reset_cdp_session(page)
+        return False
+
+
+def _overlaps(box, boxes, dx=25, dy=25, dw=60):
+    for b in boxes:
+        if (abs(b['x'] - box['x']) < dx and abs(b['y'] - box['y']) < dy
+                and abs(b['width'] - box['width']) < dw):
+            return True
+    return False
+
+
+def challenge_frames(page):
+    """真 challenge iframe：frame 樹反查（覆蓋 closed shadow DOM）+ light DOM 兜底"""
+    targets, seen = [], []
+    try:
+        for f in page.frames:
+            if TURNSTILE_FRAME_URL_MARKER not in (f.url or ''):
+                continue
+            try:
+                fe = f.frame_element()
+                if not fe.is_visible():
+                    continue
+                box = fe.bounding_box()
+                if box and box.get('width', 0) > 10 and box.get('height', 0) > 10:
+                    seen.append(box)
+                    targets.append((fe, box))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    try:
+        for el in page.locator("iframe[src*='challenges.cloudflare.com']").all():
+            try:
+                if not el.is_visible():
+                    continue
+                box = el.bounding_box()
+                if box and box.get('width', 0) > 10 and box.get('height', 0) > 10 \
+                        and not _overlaps(box, seen):
+                    seen.append(box)
+                    targets.append((el, box))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return targets
+
+
+def challenge_containers(page):
+    """token 輸入框嘅 light DOM 祖先容器（兜底點擊目標）"""
+    targets = []
+    try:
+        for el in page.locator(
+                'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]').all():
+            try:
+                if el.evaluate("n => !!(n.value && n.value.length > 20)"):
+                    continue
+                box = el.evaluate("""n => {
+                    let p = n.parentElement;
+                    for (let i = 0; i < 4 && p; i++) {
+                        const r = p.getBoundingClientRect();
+                        if (r.width > 40 && r.height > 20)
+                            return {x: r.x, y: r.y, width: r.width, height: r.height};
+                        p = p.parentElement;
+                    }
+                    return null;
+                }""")
+                if box and not _overlaps(box, [b for _, b in targets]):
+                    targets.append((None, box))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return targets
+
+
+def challenge_boxes(page):
+    """合併挑戰框目標（iframe 優先，容器兜底去重）"""
+    frames = challenge_frames(page)
+    seen = [b for _, b in frames]
+    targets = list(frames)
+    for el, box in challenge_containers(page):
+        if not _overlaps(box, seen):
+            targets.append((el, box))
+    return targets
+
+
 def wait_turnstile_token(page, timeout=75):
-    """等 Turnstile 互動驗證通過。
+    """等 Turnstile 互動驗證通過（frame 樹反查 + 真事件點擊）。
 
     2026-09-20 定案：`/php/renew_free_service.php` 對免費續期每次都要過反機械人測試
     （HTTP 428 + `captcha_required`，前端用 `window.fdCaptchaSolve()` render
     Cloudflare Turnstile）。無 token 就 alert("Renouvellement impossible.")
     然後按鈕復位 —— 舊版腳本照當「續期成功」（run 35496183082/35496473395）。
-    呢度只係點個 widget 嘅 checkbox（managed 模式多數自動過），唔係 solver。
+    2026-10-08：改用 HidenCloud 勝方配方（frame 樹反查 + frame_element.click + CDP 兜底）；
+    舊版 locator 路線實測永遠搵唔到 iframe（closed shadow DOM）→ 必敗。
     """
     deadline = time.time() + timeout
-    clicked = False
-    last_log = 0.0
-    last_click = 0.0
     start = time.time()
+    last_log = 0.0
+    click_count = 0
+    grace = 6.0            # 等 widget 現身，之後就用正確目標撳
     while time.time() < deadline:
         try:
             got = page.evaluate(
@@ -371,41 +523,51 @@ def wait_turnstile_token(page, timeout=75):
                 print(f"   [CAPTCHA] {st}")
             except Exception as e:
                 print(f"   [CAPTCHA] 狀態讀取失敗: {repr(e)[:100]}")
-        # 2026-09-20（run 35502154511 之後）：站方 widget 係 Cloudflare「managed」模式，
-        # 好多時唔使撳都會自己過；我哋一撳就即刻換嚟 "Le test a échoué"。所以改成
-        # 先靜觀 25 秒（完全唔撳），唔得先人手式撳一次。
-        quiet = 25
-        if time.time() - start < quiet:
+            # 2026-10-08 新增：frame 樹反查結果（DOM 睇唔到 closed shadow DOM 內嘅 iframe）
+            try:
+                fr = challenge_frames(page)
+                allfr = [(f.url or '')[:70] for f in page.frames]
+                print(f"   [FRAMES] 共 {len(allfr)} 個；challenge 命中 {len(fr)}；urls={allfr[:6]}")
+            except Exception as e:
+                print(f"   [FRAMES] 讀取失敗: {repr(e)[:100]}")
+
+        if time.time() - start < grace:
             time.sleep(1)
             continue
-        try:
-            fr = page.locator("iframe[src*='challenges.cloudflare.com']")
-            if fr.count() > 0:
-                box = fr.first.bounding_box()
-                if box and box.get("width", 0) > 0 and not clicked:
-                    cx = box["x"] + 30
-                    cy = box["y"] + box["height"] / 2
-                    human_click(page, cx, cy)
-                    clicked = True
-                    print("🖱️ 已點 Turnstile widget，等驗證通過…")
-        except Exception:
-            pass
-        # 2026-09-20：實測 .fd-captcha-widget 有 render（378x73）但頁面 **完全冇 iframe**
-        # （Turnstile 收喺 closed shadow DOM）→ 退返用容器座標直接點 widget 左邊 checkbox 位。
-        if not clicked and time.time() - last_click > 10:
-            try:
-                wbox = page.evaluate("""() => { const w = document.querySelector('.fd-captcha-widget');
-                    if (!w) return null; const r = w.getBoundingClientRect();
-                    return (r.width > 50) ? [r.x, r.y, r.width, r.height] : null; }""")
-                if wbox:
-                    cx = wbox[0] + 30
-                    cy = wbox[1] + wbox[3] / 2
-                    human_click(page, cx, cy)
-                    last_click = time.time()
-                    print(f"🖱️ 已點驗證 widget 容器（{int(cx)},{int(cy)}），等驗證通過…")
-            except Exception:
-                pass
-        time.sleep(1)
+
+        targets = challenge_boxes(page)
+        if not targets:
+            time.sleep(1)
+            continue
+
+        for el, box in targets:
+            done = False
+            if el is not None:
+                try:
+                    el.scroll_into_view_if_needed(timeout=3000)
+                except Exception:
+                    pass
+                try:
+                    el.click(position={'x': min(30, box['width'] / 2),
+                                       'y': box['height'] / 2}, timeout=5000)
+                    click_count += 1
+                    print(f"🖱️ 已點 Turnstile iframe（frame_element.click #{click_count}）")
+                    done = True
+                except Exception as e:
+                    print(f"   ⚠️ frame_element.click 失敗，轉 CDP: {repr(e)[:80]}")
+            if not done:
+                try:
+                    if cdp_click_at(page, box['x'] + min(30, box['width'] / 2),
+                                    box['y'] + box['height'] / 2):
+                        click_count += 1
+                        print(f"🖱️ CDP 底層點擊 Turnstile "
+                              f"({int(box['x'] + 30)}, {int(box['y'] + box['height'] / 2)}) #{click_count}")
+                        done = True
+                except Exception as e:
+                    print(f"   ⚠️ CDP 點擊異常: {repr(e)[:80]}")
+            if done:
+                break
+        time.sleep(1.5)
     print("⚠️ 等 Turnstile 逾時（token 未到手）")
     return False
 
