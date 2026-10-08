@@ -79,6 +79,11 @@ jobs:
           # 默認 watchdog（2026-10-08 起）。排程觸發時 inputs 為空 → 落到
           # 'watchdog'，即只讀 + 到期提醒；要真試續期先人手 dispatch 揀 mode=renew。
           FD_MODE: ${{ inputs.mode || 'watchdog' }}
+          # 代理出口（2026-10-08 加）：setup_proxy.sh 用 NODE_LINK 起 sing-box →
+          # 寫 PROXY_SERVER=socks5://127.0.0.1:1080 入 $GITHUB_ENV → renew.py 開
+          # context 時帶 proxy。目的：試「Turnstile 失敗係唔係 GHA runner IP 問題」。
+          # 冇設 secret 就照舊直連，唔會爆。
+          NODE_LINK: ${{ secrets.NODE_LINK }}
           # 演练开关：renewkit.notify.send 里唯一的闸门，设了就只打印不发。
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
           # 有頭用嘅虛擬顯示（xvfb-run --server-num=99 同呢個數字對齊）。
@@ -104,6 +109,9 @@ jobs:
           # setup-continue-on-error 设 false：迁移前这几条失败就是硬失败，
           # 不改成软失败（软失败只会把问题推迟到脚本里，报错更难读）。
           setup-command: |
+            # 2026-10-08：先起代理（NODE_LINK → sing-box → socks5:1080）。
+            # 失敗唔硬死 —— 退返直連，等腳本照跑並留低證據。
+            bash ./setup_proxy.sh || echo '[WARN] 代理起唔到（可能節點已死），回退直連'
             playwright install chromium
             playwright install-deps chromium
             python -m patchright install chromium || echo '[WARN] patchright chromium 裝唔到，會退回 playwright'

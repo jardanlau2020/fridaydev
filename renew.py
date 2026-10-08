@@ -256,6 +256,22 @@ def current_mode() -> str:
     return (env.get("FD_MODE", "watchdog") or "watchdog").strip().lower()
 
 
+def proxy_config():
+    """PROXY_SERVER（例如 socks5://127.0.0.1:1080）→ playwright 嘅 proxy dict。
+
+    由 setup_proxy.sh 寫入 $GITHUB_ENV（fleet 標準路線：NODE_LINK → sing-box → socks5）。
+    冇設就返 None＝直連。
+
+    2026-10-08：加呢條路係為咗試「Turnstile 失敗係唔係出口 IP 問題」——
+    10-08 窗口真跑證實撳到正確 iframe 但挑戰仍判敗（Le test a échoué），
+    懷疑係 GHA runner（Azure 機房 IP）被 CF 風險評估拒。
+    """
+    raw = (env.get("PROXY_SERVER", "") or "").strip()
+    if not raw:
+        return None
+    return {"server": raw}
+
+
 def human_click(page, x, y):
     """2026-09-20：似真人嘅點擊序列。
 
@@ -616,16 +632,27 @@ def run(raw_cookie: str):
             browser = p.chromium.launch(headless=HEADLESS, args=args)
             print(f"[INFO] 引擎 = chromium headless={HEADLESS}", flush=True)
         try:
+            _proxy = proxy_config()
+            print(f"[INFO] 出口模式 = {'代理 ' + _proxy['server'] if _proxy else '直連（無 PROXY_SERVER）'}",
+                  flush=True)
             context = browser.new_context(
                 user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                             "AppleWebKit/537.36 (KHTML, like Gecko) "
                             "Chrome/143.0.0.0 Safari/537.36"),
-                viewport={"width": 1920, "height": 1080}
+                viewport={"width": 1920, "height": 1080},
+                **({"proxy": _proxy} if _proxy else {})
             )
 
             context.add_cookies(cookies)
             page = context.new_page()
             page.add_init_script(STEALTH_JS)
+            if _proxy:
+                # 留低出口 IP 做證據（試「IP 假設」時唯一能分辨嘅數據）
+                try:
+                    page.goto("https://api.ipify.org/?format=text", timeout=30000)
+                    print(f"[INFO] 實際出口 IP = {page.inner_text('body').strip()[:40]}", flush=True)
+                except Exception as _e:
+                    print(f"[WARN] 讀出口 IP 失敗: {str(_e)[:100]}", flush=True)
 
             # ── 監聽續期 API 同 alert（2026-09-20）：之前冇監聽，428/alert 全部走漏，
             #    所以「按鈕點完冇反應」被誤報成「續期成功」。──
