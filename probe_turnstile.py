@@ -50,7 +50,7 @@ DO_POST = (os.environ.get("PROBE_POST") or "1").strip() not in ("0", "false", "F
 # ⚠️ 一定要**單行** JS：UC 模式下 sb.execute_script 走 CDP evaluate，唔吞多行（會回 {}）。
 # 2026-10-06 Lunes 同款坑；今次首跑 run 38739272603 又中（[1 初次載入] {}）。
 STATE_JS = (
-    "(function(){var q=function(s){return document.querySelector(s)};"
+    "var q=function(s){return document.querySelector(s)};"
     "var i=q('input[name=\"cf-turnstile-response\"]');"
     "var w=q('.fd-captcha-widget')||q('[class*=captcha]');"
     "var b=w?w.getBoundingClientRect():null;"
@@ -59,15 +59,21 @@ STATE_JS = (
     "iframes:document.querySelectorAll('iframe').length,"
     "cf_iframes:document.querySelectorAll('iframe[src*=\"challenges.cloudflare.com\"]').length,"
     "widget:!!w,token_len:i?(i.value||'').length:-1,"
-    "box:b?{x:Math.round(b.x),y:Math.round(b.y),w:Math.round(b.width),h:Math.round(b.height)}:null});})()"
+    "box:b?{x:Math.round(b.x),y:Math.round(b.y),w:Math.round(b.width),h:Math.round(b.height)}:null});"
 )
-# 服務頁有咩線索（單行）
+# 服務頁有咩線索（單行、同樣結尾 return）
 INFO_JS = (
-    "(function(){var t=document.body?document.body.innerText.replace(/\\s+/g,' '):'';"
+    "var t=document.body?document.body.innerText.replace(/\\s+/g,' '):'';"
     "var m=t.match(/(Renouvelable[^.]{0,40}|Renouveler[^.]{0,30})/);"
-    "var btn=document.querySelector('[onclick*=renew],[data-uuid],[class*=renew]');"
-    "return JSON.stringify({snippet:t.slice(0,220),renew_text:m?m[1]:null,"
-    "has_uuid_attr:!!(btn&&btn.getAttribute('data-uuid'))});})()"
+    "return JSON.stringify({snippet:t.slice(0,200),renew_text:m?m[1]:null,"
+    "cf_frames:document.querySelectorAll('iframe[src*=\"challenges.cloudflare.com\"]').length});"
+)
+# 撳 cookie 橫幅（遮住服務卡底部嘅掣）
+DISMISS_JS = (
+    "var bs=document.querySelectorAll('button');"
+    "for(var k=0;k<bs.length;k++){var x=(bs[k].innerText||'').trim().toLowerCase();"
+    "if(x==='refuser'||x==='accepter'||x==='tout accepter'||x==='accepter et fermer'){bs[k].click();return x;}}"
+    "return '';"
 )
 
 
@@ -160,6 +166,12 @@ def main() -> int:
         sb.wait_for_ready_state_complete()
         time.sleep(3)
         print(f"  [0] URL = {sb.get_current_url()}", flush=True)
+        try:
+            got = sb.execute_script(DISMISS_JS)
+            print(f"  [cookie 橫幅] 撳咗: {got!r}", flush=True)
+            time.sleep(2)
+        except Exception as exc:
+            print(f"  ⚠️ 撳 cookie 橫幅失敗: {type(exc).__name__}", flush=True)
         dump("1 初次載入", sb)
 
         # 頁面通常唔會一開始就 render widget（要撳續期先出）→ 直接呼叫前端
