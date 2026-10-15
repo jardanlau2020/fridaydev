@@ -77,6 +77,21 @@ DISMISS_JS = (
 )
 
 
+SRC_JS = "return String(window.fdCaptchaSolve).slice(0,400);"
+LOADCF_JS = (
+    "var s=document.createElement('script');"
+    "s.src='https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';"
+    "s.async=true;document.head.appendChild(s);"
+    "return 'injected';"
+)
+BTN_JS = (
+    "var bs=document.querySelectorAll('button,a');var out=[];"
+    "for(var k=0;k<bs.length;k++){var t=(bs[k].innerText||'').trim();"
+    "if(/renouvel/i.test(t)){out.push(t.slice(0,40)+(bs[k].disabled?' [disabled]':''));}}"
+    "return JSON.stringify(out);"
+)
+
+
 def parse_cookies(raw: str) -> list[dict]:
     out = []
     for item in (raw or "").split(";"):
@@ -173,6 +188,26 @@ def main() -> int:
         except Exception as exc:
             print(f"  ⚠️ 撳 cookie 橫幅失敗: {type(exc).__name__}", flush=True)
         dump("1 初次載入", sb)
+        try:
+            print(f"  [fdCaptchaSolve 源碼] {sb.execute_script(SRC_JS)}", flush=True)
+        except Exception as exc:
+            print(f"  ⚠️ 讀 fdCaptchaSolve 源碼失敗: {type(exc).__name__}", flush=True)
+        try:
+            print(f"  [續期掣] {sb.execute_script(BTN_JS)}", flush=True)
+        except Exception:
+            pass
+        # 核心測試：住宅出口能唔能載到 Cloudflare Turnstile 腳本？
+        # （10-08 嘅失敗簽名就係「widget render 到但 iframes=[]、window.turnstile undefined」）
+        try:
+            print(f"  [載 CF 腳本] {sb.execute_script(LOADCF_JS)}", flush=True)
+        except Exception as exc:
+            print(f"  ⚠️ 注入 CF 腳本失敗: {type(exc).__name__}", flush=True)
+        for _ in range(6):
+            time.sleep(3)
+            st_cf = state(sb)
+            if st_cf.get("turnstile_api") not in (None, "undefined"):
+                break
+        dump("1b 載入 CF 腳本後", sb)
 
         # 頁面通常唔會一開始就 render widget（要撳續期先出）→ 直接呼叫前端
         # window.fdCaptchaSolve()（純前端 render，零伺服器寫入；比 POST 續期端點安全）
@@ -232,9 +267,9 @@ def main() -> int:
                "💡 即係「有頭 UC 瀏覽器 + 住宅出口」過得站方反機械人閘 → 可以考慮試全自動續期（要你拍板）")
     else:
         msg = ("🧪 FridayDev Turnstile 探針（只讀）\n"
-               f"❌ 攞唔到 token｜widget={'有' if final.get('widget') else '冇'}｜"
-               f"cf_iframes={final.get('cf_iframes')}｜turnstile_api={final.get('turnstile_api')}｜"
-               f"token_len={final.get('token_len')}")
+               f"❌ 攞唔到 token（widget 未 render —— 站方只喺**續期流程**先出驗證）\n"
+               f"但關鍵子測試：CF 腳本載入後 turnstile_api={final.get('turnstile_api')}、"
+               f"cf_iframes={final.get('cf_iframes')}｜節點 {os.environ.get('PROXY_NODE','?')}")
     print("\n" + msg.replace("**", ""))
     tg(msg)
     return 0 if ok else 2
