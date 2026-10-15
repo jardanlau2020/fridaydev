@@ -92,6 +92,50 @@ BTN_JS = (
 )
 
 
+HOOK_JS = (
+    "if(window.__fdhook) return 'already';"
+    "window.__fdapi=[];"
+    "var of=window.fetch;"
+    "window.fetch=function(){var a=arguments;return of.apply(this,a).then(function(r){"
+    "try{r.clone().text().then(function(t){window.__fdapi.push({url:String(r.url),status:r.status,body:String(t).slice(0,500)});});}catch(e){}"
+    "return r;});};"
+    "var oo=XMLHttpRequest.prototype.open,os=XMLHttpRequest.prototype.send;"
+    "XMLHttpRequest.prototype.open=function(m,u){this.__u=u;return oo.apply(this,arguments);};"
+    "XMLHttpRequest.prototype.send=function(){var self=this;"
+    "this.addEventListener('load',function(){try{window.__fdapi.push({url:String(self.__u),status:self.status,body:String(self.responseText||'').slice(0,500)});}catch(e){}});"
+    "return os.apply(this,arguments);};"
+    "window.__fdhook=1;return 'hooked';"
+)
+API_JS = "return JSON.stringify(window.__fdapi||[]).slice(0,1500);"
+BTN_INFO_JS = (
+    "var bs=document.querySelectorAll('button,a');var out=[];"
+    "for(var k=0;k<bs.length;k++){var t=(bs[k].innerText||'').trim();"
+    "if(/renouvel/i.test(t)){out.push({tag:bs[k].tagName,disabled:!!bs[k].disabled,"
+    "cls:String(bs[k].className).slice(0,60),onclick:String(bs[k].getAttribute('onclick')||'').slice(0,160),"
+    "data:Array.prototype.slice.call(bs[k].attributes).map(function(a){return a.name+'='+String(a.value).slice(0,60);}).join('|').slice(0,300)});}}"
+    "return JSON.stringify(out);"
+)
+ENABLE_JS = (
+    "var bs=document.querySelectorAll('button,a');var n=0;"
+    "for(var k=0;k<bs.length;k++){var t=(bs[k].innerText||'').trim();"
+    "if(/renouvel/i.test(t)){bs[k].removeAttribute('disabled');bs[k].disabled=false;"
+    "bs[k].classList.remove('disabled');bs[k].style.pointerEvents='auto';n++;}}"
+    "return 'enabled:'+n;"
+)
+CLICK_JS = (
+    "var bs=document.querySelectorAll('button,a');"
+    "for(var k=0;k<bs.length;k++){var t=(bs[k].innerText||'').trim();"
+    "if(/renouvel/i.test(t)){bs[k].click();return 'clicked:'+t.slice(0,40);}}"
+    "return 'not-found';"
+)
+SITEKEY_JS = (
+    "var r=window.__fdapi||[];"
+    "for(var i=0;i<r.length;i++){var b=String(r[i].body||'');"
+    "var m=b.match(/\"site_?key\"\s*:\s*\"([^\"]+)\"/i)||b.match(/(0x4[A-Za-z0-9_\-]{10,})/);"
+    "if(m){return m[1];}}return '';"
+)
+
+
 def parse_cookies(raw: str) -> list[dict]:
     out = []
     for item in (raw or "").split(";"):
@@ -227,6 +271,43 @@ def main() -> int:
                     dump("2 呼叫 fdCaptchaSolve 後", sb)
             except Exception as exc:
                 print(f"  ⚠️ 呼叫 fdCaptchaSolve 失敗: {type(exc).__name__}: {exc}", flush=True)
+
+        # ── 完整流程：hook API → 強制 enable 續期掣 → click → 讀 428 + sitekey
+        #    → fdCaptchaSolve(sitekey) render widget → UC 點 → 睇能唔能攞 token
+        print("  === 完整流程測試（hook → 撳掣 → 428 → render widget → 點）===", flush=True)
+        try:
+            print(f"  [hook] {sb.execute_script(HOOK_JS)}", flush=True)
+        except Exception as exc:
+            print(f"  ⚠️ hook 失敗: {type(exc).__name__}", flush=True)
+        try:
+            print(f"  [掣資訊] {sb.execute_script(BTN_INFO_JS)}", flush=True)
+        except Exception as exc:
+            print(f"  ⚠️ 讀掣資訊失敗: {type(exc).__name__}", flush=True)
+        try:
+            print(f"  [強制 enable] {sb.execute_script(ENABLE_JS)}", flush=True)
+            time.sleep(1)
+            print(f"  [撳掣] {sb.execute_script(CLICK_JS)}", flush=True)
+        except Exception as exc:
+            print(f"  ⚠️ 撳掣失敗: {type(exc).__name__}", flush=True)
+        for _ in range(8):
+            time.sleep(3)
+            st2 = state(sb)
+            if st2.get("widget"):
+                break
+        try:
+            print(f"  [API 回應] {sb.execute_script(API_JS)}", flush=True)
+        except Exception as exc:
+            print(f"  ⚠️ 讀 API 回應失敗: {type(exc).__name__}", flush=True)
+        try:
+            sk = sb.execute_script(SITEKEY_JS)
+            print(f"  [sitekey] {sk!r}", flush=True)
+            if sk:
+                call_js = ("window.fdCaptchaSolve(" + json.dumps(sk) + "); return 'called';")
+                print(f"  [呼叫 fdCaptchaSolve] {sb.execute_script(call_js)}", flush=True)
+                time.sleep(6)
+        except Exception as exc:
+            print(f"  ⚠️ 取 sitekey／呼叫 fdCaptchaSolve 失敗: {type(exc).__name__}: {exc}", flush=True)
+        dump("2b 撳掣 + 引驗證後", sb)
 
         # 嘗試 UC 模式點 widget 攞 token（唔提交任何嘢）
         for attempt in range(1, 4):
