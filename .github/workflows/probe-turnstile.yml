@@ -38,10 +38,13 @@ jobs:
 
       - name: 住宅出口（cfnew 家宽 / mihomo）
         if: ${{ inputs.use_proxy }}
+        # 代理純粹係加分項：起唔到／揀唔到節點都唔應該殺死探針
+        continue-on-error: true
         env:
           SUB_URL: ${{ secrets.SUB_URL }}
         run: |
           set -uo pipefail
+          set +e            # GitHub 用 bash -e 跑 run；呢度明確關掉，唔好俾單條 curl 失敗殺死
           [ -z "${SUB_URL:-}" ] && { echo "[proxy] 冇 SUB_URL，跳過"; exit 0; }
           MIHOMO_VER=v1.19.26
           curl -sL --max-time 120 -o /tmp/mihomo.gz \
@@ -79,10 +82,10 @@ jobs:
           urllib.request.urlopen(req, timeout=15)
           PY
             sleep 4
-            A=$(curl -s -o /dev/null -w '%{http_code}' --max-time 12 --socks5-hostname 127.0.0.1:1080 https://fridaydev.fr/ 2>/dev/null)
-            B=$(curl -s -o /dev/null -w '%{http_code}' --max-time 12 --socks5-hostname 127.0.0.1:1080 https://challenges.cloudflare.com/turnstile/v0/api.js 2>/dev/null)
+            A=$(curl -s -o /dev/null -w '%{http_code}' --max-time 12 --socks5-hostname 127.0.0.1:1080 https://fridaydev.fr/ 2>/dev/null || true)
+            B=$(curl -s -o /dev/null -w '%{http_code}' --max-time 12 --socks5-hostname 127.0.0.1:1080 https://challenges.cloudflare.com/turnstile/v0/api.js 2>/dev/null || true)
             case "$A:$B" in
-              200:200|301:200|302:200)
+              200:200|200:301|200:302|301:200|301:301|301:302|302:200|302:301|302:302)
                 echo "[proxy] ✅ 揀到節點：${NODE}（fridaydev=${A}, turnstile_api.js=${B}）"
                 echo "PROXY_SERVER=socks5h://127.0.0.1:1080" >> "$GITHUB_ENV"
                 echo "PROXY_NODE=${NODE}" >> "$GITHUB_ENV"
