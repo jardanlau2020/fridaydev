@@ -71,7 +71,7 @@ INFO_JS = (
 )
 
 
-def parse_cookiesdef parse_cookies(raw: str) -> list[dict]:
+def parse_cookies(raw: str) -> list[dict]:
     out = []
     for item in (raw or "").split(";"):
         if "=" in item:
