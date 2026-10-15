@@ -47,28 +47,31 @@ PROXY = (os.environ.get("PROXY_SERVER") or "").strip()
 HEADLESS = (os.environ.get("FD_HEADLESS") or "false").strip().lower() in ("1", "true", "yes")
 DO_POST = (os.environ.get("PROBE_POST") or "1").strip() not in ("0", "false", "False")
 
-STATE_JS = """
-(function(){
-  var q = function(s){ return document.querySelector(s); };
-  var inp = q('input[name="cf-turnstile-response"]');
-  var wid = q('.fd-captcha-widget') || q('[class*=captcha]');
-  var box = wid ? wid.getBoundingClientRect() : null;
-  return {
-    turnstile_api: (typeof window.turnstile),
-    fdCaptchaSolve: (typeof window.fdCaptchaSolve),
-    iframes: document.querySelectorAll('iframe').length,
-    cf_iframes: document.querySelectorAll('iframe[src*="challenges.cloudflare.com"]').length,
-    widget: !!wid,
-    widget_box: box ? {x: Math.round(box.x), y: Math.round(box.y),
-                       w: Math.round(box.width), h: Math.round(box.height)} : null,
-    token_len: inp ? (inp.value || '').length : -1,
-    body_len: (document.body ? document.body.innerText.length : 0)
-  };
-})()
-"""
+# ⚠️ 一定要**單行** JS：UC 模式下 sb.execute_script 走 CDP evaluate，唔吞多行（會回 {}）。
+# 2026-10-06 Lunes 同款坑；今次首跑 run 38739272603 又中（[1 初次載入] {}）。
+STATE_JS = (
+    "(function(){var q=function(s){return document.querySelector(s)};"
+    "var i=q('input[name=\"cf-turnstile-response\"]');"
+    "var w=q('.fd-captcha-widget')||q('[class*=captcha]');"
+    "var b=w?w.getBoundingClientRect():null;"
+    "return JSON.stringify({turnstile_api:typeof window.turnstile,"
+    "fdCaptchaSolve:typeof window.fdCaptchaSolve,"
+    "iframes:document.querySelectorAll('iframe').length,"
+    "cf_iframes:document.querySelectorAll('iframe[src*=\"challenges.cloudflare.com\"]').length,"
+    "widget:!!w,token_len:i?(i.value||'').length:-1,"
+    "box:b?{x:Math.round(b.x),y:Math.round(b.y),w:Math.round(b.width),h:Math.round(b.height)}:null});})()"
+)
+# 服務頁有咩線索（單行）
+INFO_JS = (
+    "(function(){var t=document.body?document.body.innerText.replace(/\\s+/g,' '):'';"
+    "var m=t.match(/(Renouvelable[^.]{0,40}|Renouveler[^.]{0,30})/);"
+    "var btn=document.querySelector('[onclick*=renew],[data-uuid],[class*=renew]');"
+    "return JSON.stringify({snippet:t.slice(0,220),renew_text:m?m[1]:null,"
+    "has_uuid_attr:!!(btn&&btn.getAttribute('data-uuid'))});})()"
+)
 
 
-def parse_cookies(raw: str) -> list[dict]:
+def parse_cookiesdef parse_cookies(raw: str) -> list[dict]:
     out = []
     for item in (raw or "").split(";"):
         if "=" in item:
@@ -79,7 +82,21 @@ def parse_cookies(raw: str) -> list[dict]:
 
 def state(sb) -> dict:
     try:
-        return sb.execute_script(STATE_JS) or {}
+        raw = sb.execute_script(STATE_JS)
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        return json.loads(raw or "{}")
+    except Exception:
+        return {"raw": str(raw)[:200]}
+
+
+def page_info(sb) -> dict:
+    try:
+        raw = sb.execute_script(INFO_JS)
+        return json.loads(raw or "{}") if isinstance(raw, str) else (raw or {})
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
@@ -145,30 +162,24 @@ def main() -> int:
         print(f"  [0] URL = {sb.get_current_url()}", flush=True)
         dump("1 初次載入", sb)
 
-        # 若果冇 widget：用「冇 token」POST 續期端點引站方回 428 captcha_required
+        # 頁面通常唔會一開始就 render widget（要撳續期先出）→ 直接呼叫前端
+        # window.fdCaptchaSolve()（純前端 render，零伺服器寫入；比 POST 續期端點安全）
         st = state(sb)
-        if DO_POST and not st.get("widget"):
-            print("  → 頁面未見 widget，用冇 token POST 引挑戰（必被拒，唔會續期）", flush=True)
+        if not st.get("widget"):
+            print("  → 頁面未見 widget，試呼叫 window.fdCaptchaSolve()（只 render，唔提交）", flush=True)
             try:
-                r = sb.execute_async_script("""
-                    var cb = arguments[arguments.length - 1];
-                    fetch('/php/renew_free_service.php', {method:'POST',
-                          headers:{'X-Requested-With':'XMLHttpRequest'}})
-                      .then(r => r.text().then(t => cb({status:r.status, text:t.slice(0,400)})))
-                      .catch(e => cb({error: String(e)}));
-                """)
-                print(f"  [POST] {json.dumps(r, ensure_ascii=False)[:500]}", flush=True)
-            except Exception as exc:
-                print(f"  ⚠️ POST 引挑戰失敗: {type(exc).__name__}", flush=True)
-            time.sleep(4)
-            if sb.execute_script("return typeof window.fdCaptchaSolve") == "function":
-                try:
+                print(f"  [頁面線索] {json.dumps(page_info(sb), ensure_ascii=False)}", flush=True)
+            except Exception:
+                pass
+            try:
+                has = sb.execute_script("return typeof window.fdCaptchaSolve")
+                print(f"  fdCaptchaSolve = {has}", flush=True)
+                if has == "function":
                     sb.execute_script("window.fdCaptchaSolve();")
-                    print("  → 已呼叫 window.fdCaptchaSolve()", flush=True)
-                except Exception as exc:
-                    print(f"  ⚠️ fdCaptchaSolve 失敗: {type(exc).__name__}")
-            time.sleep(4)
-            dump("2 引挑戰後", sb)
+                    time.sleep(5)
+                    dump("2 呼叫 fdCaptchaSolve 後", sb)
+            except Exception as exc:
+                print(f"  ⚠️ 呼叫 fdCaptchaSolve 失敗: {type(exc).__name__}: {exc}", flush=True)
 
         # 嘗試 UC 模式點 widget 攞 token（唔提交任何嘢）
         for attempt in range(1, 4):
