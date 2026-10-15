@@ -12,6 +12,10 @@ on:
         description: "先用 cfnew 家宽住宅出口（SUB_URL）"
         type: boolean
         default: true
+  schedule:
+    # 一次性：2026-10-17 窗口開（19/10 到期前 2 日）自動跑**完整流程**測試；
+    # 18/10 補一轉（住宅節點係共享、會掉線，留保險）。跑完記得拆返。
+    - cron: '0 5 17,18 10 *'
 
 permissions:
   contents: read
@@ -37,8 +41,8 @@ jobs:
           python -c "import seleniumbase; print('seleniumbase', seleniumbase.__version__)"
 
       - name: 住宅出口（cfnew 家宽 / mihomo）
-        if: ${{ inputs.use_proxy }}
-        # 代理純粹係加分項：起唔到／揀唔到節點都唔應該殺死探針
+        # 一律試起（schedule 事件冇 inputs.use_proxy）；冇 SUB_URL 就自己跳過。
+        # 代理純粹係加分項：起唔到／揀唔到節點都唔應該殺死探針。
         continue-on-error: true
         env:
           SUB_URL: ${{ secrets.SUB_URL }}
