@@ -1,0 +1,111 @@
+name: FD Turnstile Probe (read-only)
+
+# 2026-10-15 新增，只讀探針：測「SeleniumBase UC 有頭瀏覽器 + cfnew 家宽住宅出口」
+# 能唔能過 FridayDev 站方嘅 Turnstile（`/php/renew_free_service.php` 428 captcha_required）。
+# 背景：10-08/09 判「過唔到」，但當時住宅出口喺 GHA **從未連得通**（每次都回退直連機房 IP），
+# 而當時嘅症狀（widget render 到但 iframes=[]、window.turnstile undefined）似係出口 IP 問題。
+# 本探針唔撳續期、唔提交，只 dump 狀態 + 試點 widget。
+on:
+  workflow_dispatch:
+    inputs:
+      use_proxy:
+        description: "先用 cfnew 家宽住宅出口（SUB_URL）"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: 安裝依賴（有頭 Chrome + SeleniumBase）
+        run: |
+          set -uo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb x11-utils xdotool scrot fonts-noto-cjk >/dev/null
+          pip install --quiet seleniumbase requests
+          python -m seleniumbase install chromedriver >/dev/null 2>&1 || true
+          python -c "import seleniumbase; print('seleniumbase', seleniumbase.__version__)"
+
+      - name: 住宅出口（cfnew 家宽 / mihomo）
+        if: ${{ inputs.use_proxy }}
+        env:
+          SUB_URL: ${{ secrets.SUB_URL }}
+        run: |
+          set -uo pipefail
+          [ -z "${SUB_URL:-}" ] && { echo "[proxy] 冇 SUB_URL，跳過"; exit 0; }
+          MIHOMO_VER=v1.19.26
+          curl -sL --max-time 120 -o /tmp/mihomo.gz \
+            "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VER}/mihomo-linux-amd64-${MIHOMO_VER}.gz" \
+            && gzip -dc /tmp/mihomo.gz > /tmp/mihomo && chmod +x /tmp/mihomo \
+            || { echo "[proxy] ✗ mihomo 下載失敗"; exit 0; }
+          curl -s --max-time 60 -H "user-agent: v2rayNG/1.8.5" "$SUB_URL" -o /tmp/sub.yaml || true
+          [ -s /tmp/sub.yaml ] || { echo "[proxy] ✗ 訂閱下載失敗"; exit 0; }
+          sed -i 's/^mixed-port: .*/mixed-port: 1080/; s/^external-controller: .*/external-controller: 127.0.0.1:9091/; s/^mode: .*/mode: global/' /tmp/sub.yaml
+          mkdir -p /tmp/mihomo_data
+          nohup /tmp/mihomo -f /tmp/sub.yaml -d /tmp/mihomo_data > /tmp/mihomo.log 2>&1 &
+          sleep 18
+          curl -s --max-time 10 http://127.0.0.1:9091/version >/dev/null || { echo "[proxy] ✗ mihomo 起唔到"; tail -3 /tmp/mihomo.log; exit 0; }
+          echo "[proxy] ✅ mihomo 起動"
+          python3 - <<'PY' > /tmp/nodes.txt
+          import json, urllib.request
+          d = json.load(urllib.request.urlopen("http://127.0.0.1:9091/proxies", timeout=20))["proxies"]
+          home = [k for k in d if "家宽" in k]
+          PRIO = ("KR", "TH", "VN", "TW", "HK", "SG")
+          def rank(n):
+              for i, c in enumerate(PRIO):
+                  if c + "-家宽" in n: return i
+              return len(PRIO)
+          for k in sorted(home, key=rank): print(k)
+          PY
+          N=0
+          while IFS= read -r NODE; do
+            [ -z "$NODE" ] && continue
+            N=$((N+1)); [ "$N" -gt 25 ] && break
+            python3 - "$NODE" <<'PY' 2>/dev/null || continue
+          import json, urllib.request, sys
+          req = urllib.request.Request("http://127.0.0.1:9091/proxies/GLOBAL", method="PUT",
+                data=json.dumps({"name": sys.argv[1]}).encode(),
+                headers={"content-type": "application/json"})
+          urllib.request.urlopen(req, timeout=15)
+          PY
+            sleep 4
+            A=$(curl -s -o /dev/null -w '%{http_code}' --max-time 12 --socks5-hostname 127.0.0.1:1080 https://fridaydev.fr/ 2>/dev/null)
+            B=$(curl -s -o /dev/null -w '%{http_code}' --max-time 12 --socks5-hostname 127.0.0.1:1080 https://challenges.cloudflare.com/turnstile/v0/api.js 2>/dev/null)
+            case "$A:$B" in
+              200:200|301:200|302:200)
+                echo "[proxy] ✅ 揀到節點：${NODE}（fridaydev=${A}, turnstile_api.js=${B}）"
+                echo "PROXY_SERVER=socks5h://127.0.0.1:1080" >> "$GITHUB_ENV"
+                echo "PROXY_NODE=${NODE}" >> "$GITHUB_ENV"
+                exit 0 ;;
+              *) echo "[proxy] ✗ ${NODE} → fridaydev=${A:-000} cf=${B:-000}" ;;
+            esac
+          done < /tmp/nodes.txt
+          echo "[proxy] ✗ 試完 $N 條都唔通（探針會直連跑，結果僅供對照）"
+
+      - name: 跑只讀探針
+        env:
+          COOKIE: ${{ secrets.COOKIE }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          FD_HEADLESS: "false"
+          PROBE_POST: "1"
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" python -u probe_turnstile.py
+
+      - name: 上傳截圖
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fd-turnstile-probe
+          path: probe_turnstile.png
+          if-no-files-found: ignore
+          retention-days: 3
