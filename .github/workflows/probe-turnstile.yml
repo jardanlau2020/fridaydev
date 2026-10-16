@@ -55,8 +55,17 @@ jobs:
             "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VER}/mihomo-linux-amd64-${MIHOMO_VER}.gz" \
             && gzip -dc /tmp/mihomo.gz > /tmp/mihomo && chmod +x /tmp/mihomo \
             || { echo "[proxy] ✗ mihomo 下載失敗"; exit 0; }
-          curl -s --max-time 60 -H "user-agent: v2rayNG/1.8.5" "$SUB_URL" -o /tmp/sub.yaml || true
-          [ -s /tmp/sub.yaml ] || { echo "[proxy] ✗ 訂閱下載失敗"; exit 0; }
+          SUB_OK=0
+          for _try in 1 2 3; do
+            if curl -s --max-time 60 -H "user-agent: v2rayNG/1.8.5" "$SUB_URL" -o /tmp/sub.yaml \
+               && [ -s /tmp/sub.yaml ] \
+               && grep -qE '^(proxies|proxy-groups|mixed-port|mode):' /tmp/sub.yaml; then
+              SUB_OK=1; break
+            fi
+            echo "[proxy] ⚠️ 訂閱下載第 ${_try}/3 次失敗，5 秒後重試"
+            sleep 5
+          done
+          [ "$SUB_OK" = "1" ] || { echo "[proxy] ✗ 訂閱下載失敗（試 3 次）"; exit 0; }
           sed -i 's/^mixed-port: .*/mixed-port: 1080/; s/^external-controller: .*/external-controller: 127.0.0.1:9091/; s/^mode: .*/mode: global/' /tmp/sub.yaml
           mkdir -p /tmp/mihomo_data
           nohup /tmp/mihomo -f /tmp/sub.yaml -d /tmp/mihomo_data > /tmp/mihomo.log 2>&1 &
