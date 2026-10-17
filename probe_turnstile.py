@@ -353,8 +353,10 @@ def main() -> int:
                 except Exception as exc:
                     print(f"    ⚠️ uc_gui_click_captcha 亦失敗: {type(exc).__name__}: {exc}", flush=True)
             print(f"    → 點擊{'已發出' if clicked else '失敗'}", flush=True)
-            for _ in range(8):
-                time.sleep(4)
+            # managed/invisible widget 冇 checkbox，只能等 challenge 自己完成
+            # （截圖見到「Verifying...」；之前等 32 秒唔夠，放寬到 120 秒）
+            for _ in range(20):
+                time.sleep(6)
                 st = state(sb)
                 if st.get("widget"):
                     best = st
