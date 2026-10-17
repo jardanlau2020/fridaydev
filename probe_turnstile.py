@@ -166,6 +166,28 @@ def page_info(sb) -> dict:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
+def cdp_click(sb, x, y):
+    """CDP 層真實滑鼠點擊（isTrusted）。
+
+    繞過 SeleniumBase `uc_gui_click_captcha` 喺 UC/CDP 模式會拋
+    `SyntaxError: Illegal return statement` 嘅問題（2026-10-17 run 39018228210 實證：
+    撳掣成功、428+sitekey 拿到、widget render 到，但一點就炸）。
+    """
+    try:
+        drv = sb.driver
+        drv.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+        time.sleep(0.05)
+        drv.execute_cdp_cmd("Input.dispatchMouseEvent",
+                            {"type": "mousePressed", "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1})
+        time.sleep(0.06)
+        drv.execute_cdp_cmd("Input.dispatchMouseEvent",
+                            {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1})
+        return True
+    except Exception as exc:
+        print(f"    ⚠️ CDP 點擊失敗: {type(exc).__name__}: {exc}", flush=True)
+        return False
+
+
 def dump(tag: str, sb) -> dict:
     st = state(sb)
     print(f"  [{tag}] {json.dumps(st, ensure_ascii=False)}", flush=True)
@@ -298,6 +320,7 @@ def main() -> int:
             print(f"  [API 回應] {sb.execute_script(API_JS)}", flush=True)
         except Exception as exc:
             print(f"  ⚠️ 讀 API 回應失敗: {type(exc).__name__}", flush=True)
+        sk = None
         try:
             sk = sb.execute_script(SITEKEY_JS)
             print(f"  [sitekey] {sk!r}", flush=True)
@@ -307,7 +330,7 @@ def main() -> int:
                 time.sleep(6)
         except Exception as exc:
             print(f"  ⚠️ 取 sitekey／呼叫 fdCaptchaSolve 失敗: {type(exc).__name__}: {exc}", flush=True)
-        dump("2b 撳掣 + 引驗證後", sb)
+        best = dump("2b 撳掣 + 引驗證後", sb)
 
         # 嘗試 UC 模式點 widget 攞 token（唔提交任何嘢）
         for attempt in range(1, 4):
@@ -318,14 +341,23 @@ def main() -> int:
             if not st.get("widget"):
                 print(f"  （第 {attempt} 次）冇 widget 可以點", flush=True)
                 break
-            print(f"  （第 {attempt} 次）uc_gui_click_captcha…", flush=True)
-            try:
-                sb.uc_gui_click_captcha()
-            except Exception as exc:
-                print(f"    ⚠️ 點擊異常: {type(exc).__name__}: {exc}", flush=True)
+            box = st.get("box") or {}
+            print(f"  （第 {attempt} 次）點 widget：box={box}", flush=True)
+            clicked = False
+            if box:
+                clicked = cdp_click(sb, int(box["x"]) + 30, int(box["y"]) + int(box.get("h", 73)) // 2)
+            if not clicked:
+                try:
+                    sb.uc_gui_click_captcha()
+                    clicked = True
+                except Exception as exc:
+                    print(f"    ⚠️ uc_gui_click_captcha 亦失敗: {type(exc).__name__}: {exc}", flush=True)
+            print(f"    → 點擊{'已發出' if clicked else '失敗'}", flush=True)
             for _ in range(8):
                 time.sleep(4)
                 st = state(sb)
+                if st.get("widget"):
+                    best = st
                 if st.get("token_len", 0) and st["token_len"] > 50:
                     token = "x" * st["token_len"]
                     break
@@ -348,9 +380,10 @@ def main() -> int:
                "💡 即係「有頭 UC 瀏覽器 + 住宅出口」過得站方反機械人閘 → 可以考慮試全自動續期（要你拍板）")
     else:
         msg = ("🧪 FridayDev Turnstile 探針（只讀）\n"
-               f"❌ 攞唔到 token（widget 未 render —— 站方只喺**續期流程**先出驗證）\n"
-               f"但關鍵子測試：CF 腳本載入後 turnstile_api={final.get('turnstile_api')}、"
-               f"cf_iframes={final.get('cf_iframes')}｜節點 {os.environ.get('PROXY_NODE','?')}")
+               f"❌ 攞唔到 token（token_len={best.get('token_len')}）\n"
+               f"閘狀態：428+sitekey={'✅' if sk else '❌'}｜widget={'✅' if best.get('widget') else '❌'}"
+               f"｜turnstile_api={best.get('turnstile_api')}｜cf_iframes={best.get('cf_iframes')}"
+               f"｜節點 {os.environ.get('PROXY_NODE','?')}")
     print("\n" + msg.replace("**", ""))
     tg(msg)
     return 0 if ok else 2
