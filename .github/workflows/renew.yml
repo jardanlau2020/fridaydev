@@ -84,6 +84,9 @@ jobs:
           # context 時帶 proxy。目的：試「Turnstile 失敗係唔係 GHA runner IP 問題」。
           # 冇設 secret 就照舊直連，唔會爆。
           NODE_LINK: ${{ secrets.NODE_LINK }}
+          # 2026-10-17 加：改用 cfnew 家宽「訂閱」逐條試揀（舊 NODE_LINK 單節點 42.200.173.5
+          # 已死 → i/o timeout → 回退直連機房 IP → CF 腳本載唔到 → 續期失敗，run 39018711788）。
+          SUB_URL: ${{ secrets.SUB_URL }}
           # 演练开关：renewkit.notify.send 里唯一的闸门，设了就只打印不发。
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
           # 有頭用嘅虛擬顯示（xvfb-run --server-num=99 同呢個數字對齊）。
@@ -111,7 +114,9 @@ jobs:
           setup-command: |
             # 2026-10-08：先起代理（NODE_LINK → sing-box → socks5:1080）。
             # 失敗唔硬死 —— 退返直連，等腳本照跑並留低證據。
-            bash ./setup_proxy.sh || echo '[WARN] 代理起唔到（可能節點已死），回退直連'
+            # 2026-10-17：改用訂閱逐條試揀住宅出口（setup_residential.sh）。
+            # 揀唔到都唔硬死 —— 直連照跑，等腳本留低證據。
+            bash ./setup_residential.sh || echo '[WARN] 住宅出口揀唔到節點，回退直連（CF 大機會載唔到）'
             playwright install chromium
             playwright install-deps chromium
             python -m patchright install chromium || echo '[WARN] patchright chromium 裝唔到，會退回 playwright'
