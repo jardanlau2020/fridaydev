@@ -7,7 +7,7 @@
 # 逐條揀，揀到 🏠 KR-家宽-01 就正常（CF 腳本載到、428+sitekey+widget 齊）。
 # 所以呢度照抄探針嘅揀節點邏輯，令續期都有得用住宅出口。
 #
-# 成功：寫 PROXY_SERVER=socks5h://127.0.0.1:1080 同 PROXY_NODE=<節點名> 落 GITHUB_ENV
+# 成功：寫 PROXY_SERVER=socks5://127.0.0.1:1080 同 PROXY_NODE=<節點名> 落 GITHUB_ENV
 # 失敗：exit 1（caller 用 `|| echo '[WARN] …'` 兜，唔會殺 job）
 set -uo pipefail
 set +e   # GitHub 用 bash -e 跑 run；明確關掉，唔好俾單條 curl 失敗殺死
@@ -71,7 +71,7 @@ PY
   case "$A:$B" in
     200:200|200:301|200:302|301:200|301:301|301:302|302:200|302:301|302:302)
       echo "[res] ✅ 揀到節點：${NODE}（fridaydev=${A}, turnstile_api.js=${B}）"
-      { echo "PROXY_SERVER=socks5h://127.0.0.1:1080"; echo "PROXY_NODE=${NODE}"; } >> "${GITHUB_ENV:-/dev/null}"
+      { echo "PROXY_SERVER=socks5://127.0.0.1:1080"; echo "PROXY_NODE=${NODE}"; } >> "${GITHUB_ENV:-/dev/null}"
       exit 0 ;;
     *) echo "[res] ✗ ${NODE} → fridaydev=${A:-000} cf=${B:-000}" ;;
   esac
