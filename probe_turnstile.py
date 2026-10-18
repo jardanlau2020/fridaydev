@@ -310,6 +310,12 @@ def main() -> int:
         # ── 2026-10-18：續期窗口未開時掣係 disabled（title「Possible à partir de N jours restants」），
         #    前端根本唔會發請求 → 冇 428、冇 sitekey、冇 widget、冇 token。
         #    呢個係「前置條件未滿足」，唔係 Turnstile 失敗 → 直接收工，唔標紅。
+        # BTN_INFO_JS 回的是 JSON 字串（JSON.stringify），要先 parse
+        if isinstance(btn_info, str):
+            try:
+                btn_info = json.loads(btn_info)
+            except Exception:
+                btn_info = None
         if isinstance(btn_info, list) and btn_info:
             _b = btn_info[0] or {}
             _blob = json.dumps(_b, ensure_ascii=False)
