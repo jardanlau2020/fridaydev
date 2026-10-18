@@ -301,10 +301,27 @@ def main() -> int:
             print(f"  [hook] {sb.execute_script(HOOK_JS)}", flush=True)
         except Exception as exc:
             print(f"  ⚠️ hook 失敗: {type(exc).__name__}", flush=True)
+        btn_info = None
         try:
-            print(f"  [掣資訊] {sb.execute_script(BTN_INFO_JS)}", flush=True)
+            btn_info = sb.execute_script(BTN_INFO_JS)
+            print(f"  [掣資訊] {btn_info}", flush=True)
         except Exception as exc:
             print(f"  ⚠️ 讀掣資訊失敗: {type(exc).__name__}", flush=True)
+        # ── 2026-10-18：續期窗口未開時掣係 disabled（title「Possible à partir de N jours restants」），
+        #    前端根本唔會發請求 → 冇 428、冇 sitekey、冇 widget、冇 token。
+        #    呢個係「前置條件未滿足」，唔係 Turnstile 失敗 → 直接收工，唔標紅。
+        if isinstance(btn_info, list) and btn_info:
+            _b = btn_info[0] or {}
+            _blob = json.dumps(_b, ensure_ascii=False)
+            if _b.get("disabled") and ("Possible" in _blob or "Renouvelable" in _blob):
+                _m = re.search(r"(\d+)\s*jour", _blob)
+                _left = _m.group(1) if _m else "?"
+                msg = ("🧪 FridayDev 探針（只讀）\n"
+                       f"⏭️ 續期窗口未開 —— 掣 disabled（仲有 {_left} 日）\n"
+                       "呢個係前置條件未滿足，唔係 Turnstile 失敗；窗口開咗探針會自動再試。")
+                print("\n" + msg, flush=True)
+                tg(msg)
+                return 0
         try:
             print(f"  [強制 enable] {sb.execute_script(ENABLE_JS)}", flush=True)
             time.sleep(1)
