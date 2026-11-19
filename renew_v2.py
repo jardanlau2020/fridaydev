@@ -171,26 +171,21 @@ def main():
                 return 1
 
             days = info.get("days_left")
-            if days is None:
-                log("⚠️ 讀唔到剩餘日數，保守當未到窗口")
-                notify("⚠️ FridayDev · 讀唔到剩餘日數（%s）" % info.get("expiry"))
-                return 0
+            btn_open = (info.get("btn_disabled") is False)
 
-            if days > 2:
-                log("⏳ 未到窗口（剩 %s 日，需 ≤2 日）：靜默結束" % days)
-                if info.get("btn_disabled") is False:
-                    log("（注意：掣已啟用但日數 >2，照樣唔撳）")
-                return 0
-
-            if MODE != "renew":
-                if info.get("btn_disabled") is False:
-                    log("🔔 watchdog：剩 %s 日、掣已開 → 提醒人手撳" % days)
-                    notify("🔔 FridayDev 續期窗口已開（剩 %s 日，到期 %s）\n請上面板撳「Renouveler」" % (days, info.get("expiry")))
-                elif days <= 1:
-                    log("🔔 watchdog：剩 %s 日但掣仍停用 → 提醒" % days)
+            # 判窗口：以掣狀態為準（站方文字「Renouvelable dans N jour(s)」係
+            # 倒數，掣一開文字就唔再係呢個格式，唔可以用日數做主判據）
+            if btn_open:
+                if MODE != "renew":
+                    log("🔔 watchdog：掣已開（%s，到期 %s）→ 提醒人手撳" % (info.get("btn_text"), info.get("expiry")))
+                    notify("🔔 FridayDev 續期窗口已開（到期 %s）\n請上面板撳「Renouveler」" % info.get("expiry"))
+                    return 0
+            else:
+                if days is not None and days <= 1:
+                    log("⚠️ 剩 %s 日但掣仍停用（%s）→ 提醒" % (days, info.get("btn_text")))
                     notify("⚠️ FridayDev 只剩 %s 日（到期 %s），但續期掣仍停用（%s）\n請人手上面板確認" % (days, info.get("expiry"), info.get("btn_text")))
                 else:
-                    log("⏳ 剩 %s 日但掣仍停用（%s）：靜默等下一輪" % (days, info.get("btn_text")))
+                    log("⏳ 未到窗口（%s，到期 %s）：靜默結束" % (info.get("btn_text"), info.get("expiry")))
                 return 0
 
             # ── renew ──
