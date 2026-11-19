@@ -73,7 +73,9 @@ jobs:
       - name: 运行续期脚本（renew-kit）
         uses: jardanlau2020/renew-kit/.github/actions/renew@v0.5.3
         env:
-          COOKIE: ${{ secrets.COOKIE }}
+          # 2026-11-19：站方改版，cookie 方案作廢 → 改用帳密即場登入
+          FD_EMAIL: ${{ secrets.FD_EMAIL }}
+          FD_PASSWORD: ${{ secrets.FD_PASSWORD }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           # 默認 watchdog（2026-10-08 起）。排程觸發時 inputs 為空 → 落到
@@ -93,7 +95,7 @@ jobs:
           # 規程：起咗 Xvfb 但冇 DISPLAY = 白起。
           DISPLAY: ':99'
         with:
-          script: renew.py
+          script: renew_v2.py
           python-version: "3.10"
           renewkit-ref: v0.5.3
           pip-packages: playwright patchright
