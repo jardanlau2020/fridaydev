@@ -104,7 +104,7 @@ jobs:
           apt-packages: xvfb
           # 用 xvfb-run 包住跑 → DISPLAY 由佢設定，配合 env DISPLAY=:99。
           # 對齊 HidenCloud 10-05 嗰單成功配方（xvfb + 真 Chrome + headed）。
-          command: xvfb-run --server-num=99 -s "-screen 0 1920x1080x24" python -u renew.py
+          command: xvfb-run --server-num=99 -s "-screen 0 1920x1080x24" python -u renew_v2.py
           # 浏览器安装放这里，跟迁移前逐条对齐：
           #   · playwright install chromium        —— 主引擎
           #   · playwright install-deps chromium   —— 系统库（内部自己 sudo）
