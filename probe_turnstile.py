@@ -258,9 +258,23 @@ def main() -> int:
         #    widget=false 一堆空值，最後把「登入態冇咗」誤報成「Turnstile 拿不到 token」。
         #    呢個係憑證問題，唔係 Turnstile 問題 → 直接講清楚，退出碼 3（環境問題）。
         _landed = (sb.get_current_url() or "")
-        if "/404" in _landed or "/login" in _landed or "/connexion" in _landed:
+        # 2026-11-21：雙重判 —— URL 命中 /404、/login 之外，再核對頁面標題／正文，
+        # 避免「網址正常但內容係 Page Not Found」呢種情況漏判。
+        try:
+            _title = (sb.get_title() or "")
+        except Exception:
+            _title = ""
+        try:
+            _head = (sb.execute_script("return (document.body?document.body.innerText:'').slice(0,400)") or "")
+        except Exception:
+            _head = ""
+        _is404 = ("/404" in _landed or "/login" in _landed or "/connexion" in _landed
+                  or "page not found" in _title.lower() or "404" in _title.lower()
+                  or "oups" in _head.lower() or "n'existe pas" in _head.lower())
+        if _is404:
             _msg = ("🧪 FridayDev 探針（只讀）\n"
                     f"❌ COOKIE 已失效 —— 開 /services/ 被前端跳去 {_landed}\n"
+                    f"頁面標題：{_title}\n"
                     "Turnstile 冇問題，係登入態冇咗。請重新登入 fridaydev.fr，"
                     "把新的 cookie 寫入 secret COOKIE。")
             print("\n" + _msg, flush=True)
