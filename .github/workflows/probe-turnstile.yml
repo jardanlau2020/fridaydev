@@ -27,6 +27,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # 2026-11-21：告警状态与 renew.yml 共用同一个 cache 前缀（fdalert-），
+      # 这样 renew 和 probe 合起来一天也只发一条 TG，同日重复走 editMessageText。
+      - name: ♻️ 恢复告警状态（一天一条）
+        uses: actions/cache/restore@v4
+        with:
+          path: fd_alert_state.json
+          key: fdalert-${{ github.run_id }}
+          restore-keys: |
+            fdalert-
+
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -116,6 +126,13 @@ jobs:
           FD_HEADLESS: "false"
           PROBE_POST: "1"
         run: xvfb-run -a -s "-screen 0 1920x1080x24" python -u probe_turnstile.py
+
+      - name: 💾 保存告警状态
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: fd_alert_state.json
+          key: fdalert-${{ github.run_id }}
 
       - name: 上傳截圖
         if: always()

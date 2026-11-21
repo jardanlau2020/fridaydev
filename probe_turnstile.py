@@ -206,20 +206,17 @@ def dump(tag: str, sb) -> dict:
     return st
 
 
-def tg(text: str) -> None:
-    tok = os.environ.get("TG_BOT_TOKEN")
-    chat = os.environ.get("TG_CHAT_ID")
-    if not tok or not chat:
-        return
+def tg(kind: str, detail: str = "") -> None:
+    """告警统一走 fd_alert：一天最多一条，同日重复合并进同一条。
+
+    探针每次 dispatch 都发一条 → 之前一天能刷出好几条，这是主要噪声源。
+    这里只给 kind + detail，正文（可执行步骤）由 fd_alert.STEPS 生成。
+    """
     try:
-        import urllib.request
-        data = json.dumps({"chat_id": chat, "text": text, "parse_mode": "HTML"}).encode()
-        req = urllib.request.Request(f"https://api.telegram.org/bot{tok}/sendMessage",
-                                     data=data, headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=15)
-        print("  TG 已發")
+        from fd_alert import alert
+        alert(kind, detail=detail)
     except Exception as exc:
-        print(f"  TG 失敗: {exc}")
+        print(f"  [alert] 跳过: {exc}", flush=True)
 
 
 def main() -> int:
@@ -289,7 +286,7 @@ def main() -> int:
                     "Turnstile 冇問題，係登入態冇咗。請重新登入 fridaydev.fr，"
                     "把新的 cookie 寫入 secret COOKIE。")
             print("\n" + _msg, flush=True)
-            tg(_msg)
+            tg("probe_cookie", detail=f"开 /services/ 被前端跳到 {_landed}（标题：{_title}）")
             return 3
         try:
             got = sb.execute_script(DISMISS_JS)
@@ -370,7 +367,7 @@ def main() -> int:
                        f"⏭️ 續期窗口未開 —— 掣 disabled（仲有 {_left} 日）\n"
                        "呢個係前置條件未滿足，唔係 Turnstile 失敗；窗口開咗探針會自動再試。")
                 print("\n" + msg, flush=True)
-                tg(msg)
+                tg("probe_other", detail=f"续期窗口未开：按钮 disabled，还剩 {_left} 日（落地 {_landed}）")
                 return 0
         try:
             print(f"  [強制 enable] {sb.execute_script(ENABLE_JS)}", flush=True)
@@ -468,7 +465,16 @@ def main() -> int:
                f"｜節點 {os.environ.get('PROXY_NODE','?')}\n"
                "💡 结论：这条路到此为止，改人工提醒；别再烧 CI 时间")
     print("\n" + msg.replace("**", ""))
-    tg(msg)
+    if ok:
+        tg("probe_other",
+           detail=f"✅ 探针过闸：token_len={len(token)}｜widget={final.get('widget')}"
+                  f"｜cf_iframes={final.get('cf_iframes')}｜turnstile_api={final.get('turnstile_api')}"
+                  f"｜节点 {os.environ.get('PROXY_NODE','?')}")
+    else:
+        tg("probe_other",
+           detail=f"{verdict}｜token_len={best.get('token_len')}｜428+sitekey={'✅' if sk else '❌'}"
+                  f"｜widget={best.get('widget')}｜turnstile_api={best.get('turnstile_api')}"
+                  f"｜cf_iframes={cf_if}｜节点 {os.environ.get('PROXY_NODE','?')}")
     return 0 if ok else 2
 
 

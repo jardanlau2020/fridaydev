@@ -33,6 +33,8 @@ from datetime import datetime, timezone
 
 from playwright.sync_api import sync_playwright
 
+from fd_alert import alert
+
 EMAIL = (os.environ.get("FD_EMAIL") or "").strip()
 PASSWORD = os.environ.get("FD_PASSWORD") or ""
 MODE = (os.environ.get("FD_MODE") or "watchdog").strip().lower()
@@ -50,58 +52,9 @@ def log(msg):
     print("[%s] %s" % (datetime.now(timezone.utc).strftime("%H:%M:%SZ"), msg), flush=True)
 
 
-STATE_FILE = "fd_notify_state.txt"
-NOTIFY_EVERY_DAYS = 3
-
-
-def _notify_allowed(key: str) -> bool:
-    """同一类状态每 NOTIFY_EVERY_DAYS 天最多提醒一次，避免天天吵。
-
-    key 例如 "login" / "services"，各自独立计时。
-    """
-    import datetime as _dt
-    import json as _json
-    today = _dt.date.today()
-    state = {}
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as fh:
-            state = _json.loads(fh.read() or "{}")
-    except Exception:
-        state = {}
-    last = state.get(key)
-    if last:
-        try:
-            if (today - _dt.date.fromisoformat(last)).days < NOTIFY_EVERY_DAYS:
-                return False
-        except Exception:
-            pass
-    state[key] = today.isoformat()
-    try:
-        with open(STATE_FILE, "w", encoding="utf-8") as fh:
-            fh.write(_json.dumps(state, ensure_ascii=False))
-    except Exception:
-        pass
-    return True
-
-
-def notify_throttled(key: str, text: str) -> None:
-    if _notify_allowed(key):
-        notify(text)
-    else:
-        log("🔕 同类提醒已节流（每 %d 天一次）：%s" % (NOTIFY_EVERY_DAYS, key))
-
-
-def notify(text):
-    if DRY_RUN or not TG_TOKEN or not TG_CHAT:
-        log("TG(skip): " + text.replace("\n", " | ")[:300])
-        return
-    try:
-        import requests
-        r = requests.post("https://api.telegram.org/bot%s/sendMessage" % TG_TOKEN,
-                          json={"chat_id": TG_CHAT, "text": text}, timeout=15)
-        log("TG: %s" % r.status_code)
-    except Exception as e:
-        log("TG 失敗: %s" % e)
+# 2026-11-21：告警统一走 fd_alert（一天最多一条 + 正文带可执行步骤）。
+# 旧版 _notify_allowed / notify_throttled / fd_notify_state.txt（按 key 各算 3 天）
+# 已删：同一天 login 和 services 能各发一条，正是「一次失败刷好几条」的来源。
 
 
 def parse_service(page):
@@ -163,10 +116,12 @@ def do_login(page):
 def main():
     if not EMAIL or not PASSWORD:
         log("缺少 FD_EMAIL / FD_PASSWORD")
-        notify("🚨 FridayDev 續期：未設定 FD_EMAIL / FD_PASSWORD secret")
+        alert("login", detail="未设置 FD_EMAIL / FD_PASSWORD secret")
         return 1
 
     log("模式 MODE=%s | 出口=%s" % (MODE, PROXY or "直連"))
+    log("告警 fd_alert（一天最多一条）| DRY_RUN=%s | TG=%s"
+        % (DRY_RUN, "已配置" if (TG_TOKEN and TG_CHAT) else "未配置"))
     with sync_playwright() as p:
         launch = {"headless": not bool(os.environ.get("DISPLAY"))}
         ARGS = ["--no-sandbox", "--disable-blink-features=AutomationControlled", "--disable-dev-shm-usage"]
@@ -200,8 +155,7 @@ def main():
                 cur = page.url or ""
                 if "/404" in cur:
                     detail = "%s（頁面被跳到 /404，站方改版或會話被清）" % detail
-                notify_throttled("login", "🚨 FridayDev · 登入失敗\n%s\n"
-                                 "請檢查 FD_EMAIL / FD_PASSWORD" % detail)
+                alert("login", detail=detail)
                 return 1
             log("✅ 登入成功: %s" % detail)
 
@@ -218,15 +172,10 @@ def main():
                     # 那不是「结构改了」，是会话没了 —— 报准，别误导人去改选择器。
                     why = "被跳到 /404" if "/404" in cur else "被跳到 /login"
                     log("❌ 會話失效（%s）：%s" % (why, cur))
-                    notify_throttled("services",
-                                     "🚨 FridayDev · 會話失效（%s）\n"
-                                     "登入成功但 /services/ 被彈走，多半係站方清咗會話\n"
-                                     "本輪唔重試；同一狀態每 %d 天才提醒一次"
-                                     % (why, NOTIFY_EVERY_DAYS))
+                    alert("session", detail="登入成功但 /services/ 被弹到 %s" % cur)
                 else:
                     log("❌ 讀唔到服務卡（頁面結構可能又改）：%s" % cur)
-                    notify_throttled("services",
-                                     "🚨 FridayDev · 讀唔到服務卡（/services/ 結構可能又改）")
+                    alert("structure", detail="读不到服务卡，落地 URL=%s" % cur)
                 return 1
 
             days = info.get("days_left")
@@ -237,12 +186,12 @@ def main():
             if btn_open:
                 if MODE != "renew":
                     log("🔔 watchdog：掣已開（%s，到期 %s）→ 提醒人手撳" % (info.get("btn_text"), info.get("expiry")))
-                    notify("🔔 FridayDev 續期窗口已開（到期 %s）\n請上面板撳「Renouveler」" % info.get("expiry"))
+                    alert("window_open", detail="到期 %s，按钮已可点" % info.get("expiry"))
                     return 0
             else:
                 if days is not None and days <= 1:
                     log("⚠️ 剩 %s 日但掣仍停用（%s）→ 提醒" % (days, info.get("btn_text")))
-                    notify("⚠️ FridayDev 只剩 %s 日（到期 %s），但續期掣仍停用（%s）\n請人手上面板確認" % (days, info.get("expiry"), info.get("btn_text")))
+                    alert("window_open", detail="只剩 %s 日但按钮仍停用（%s）" % (days, info.get("btn_text")))
                 else:
                     log("⏳ 未到窗口（%s，到期 %s）：靜默結束" % (info.get("btn_text"), info.get("expiry")))
                 return 0
@@ -250,7 +199,7 @@ def main():
             # ── renew ──
             if info.get("btn_disabled"):
                 log("⚠️ renew 模式但掣仍 disabled（%s），等下一輪" % info.get("btn_text"))
-                notify("⚠️ FridayDev · 窗口內但掣停用（%s）" % info.get("btn_text"))
+                alert("window_open", detail="窗口内但按钮停用（%s）" % info.get("btn_text"))
                 return 0
 
             before = info.get("expiry")
@@ -289,15 +238,14 @@ def main():
 
             if after and before and after != before:
                 log("🎉 續期成功：%s → %s" % (before, after))
-                notify("🎉 FridayDev 續期成功\n%s → %s\n服務 %s" % (before, after, info.get("service_id")))
+                # 成功不是告警：只 log，不发 TG。
                 return 0
             if after_info.get("days_left") is not None and after_info["days_left"] > 2:
                 log("🎉 續期成功（剩餘日數 %s）" % after_info["days_left"])
-                notify("🎉 FridayDev 續期成功（剩 %s 日，到期 %s）" % (after_info["days_left"], after))
                 return 0
 
             log("❌ 撳完到期日冇變（%s）" % after)
-            notify("🚨 FridayDev · 撳完續期但到期日冇變（%s → %s）\n請人手上面板" % (before, after))
+            alert("renew_failed", detail="点了续期但到期日没变（%s → %s）" % (before, after))
             return 1
         finally:
             try:
