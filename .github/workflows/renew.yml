@@ -146,6 +146,10 @@ jobs:
             echo "No need to commit"
           else
             git commit -m "⏱️ Auto Update by Github Actions $(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')"
+            # main 可能在本次 job 跑的过程中被合并推进（PR #7 那次就是），
+            # 直接 push 会 `! [rejected] main -> main (fetch first)`，功能成功、
+            # 整个 run 却报红。push 前先 rebase 到最新 main。
+            git pull --rebase origin main
             git push origin main
           fi
 
