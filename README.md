@@ -42,6 +42,9 @@
 
 参考 Bothosting-Renew：GitHub 头像 ➡ Settings ➡ Developer settings ➡ Personal access tokens(classic) ➡ Generate new token(classic)，权限勾 repo 相关即可。
 
+> GH_TOKEN（自动回写 cookie）暂不启用：需要能写 secrets 的 PAT，风险大于收益，等 COOKIE 将到期或 24/11 跑通后再议。
+> 不配时日志会出现 `⚠️ 未设置 GH_TOKEN，无法自动回写`，属正常，不影响续期。
+
 ## 注意事项
 
 * Friday 免费档续期按钮双态：未到时间显示倒计时 `Renouvelable dans N jour(s)`，只通知不点；到期后同一位置文案会变化（如 `Renouveler gratuitement (N jours)`），那才是入口——点后弹 CF 验证组件（Turnstile），节点纯净自动过盾即默认续期完成。浏览器 headful 跑在 xvfb 上（Turnstile 需真渲染）。真点了但日期没变才报"可能未成功"人工检查。
