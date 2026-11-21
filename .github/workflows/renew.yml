@@ -135,8 +135,16 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python -u app.py
 
-      # 更新时间到 time.txt，避免 6 个月未更新导致工作流暂停
+      # 更新时间到 time.txt，避免 6 个月未更新导致工作流暂停。
+      # time.txt 只是防休眠的时间戳：push 撞上 main 被推进（non-fast-forward）
+      # 不值得让整个 job 报红 —— 续期本身已经成功，红只会让人误判。
+      #
+      # 只在 main 上提交：分支 dispatch 时 `git pull --rebase origin main` 会把
+      # PR 自己的提交重放到 main 上，跟 main 的 app.py 撞 add/add 冲突
+      # （run 44903339200 实测），既推不上去也没意义。
       - name: 🕒 更新时间
+        if: github.ref == 'refs/heads/main'
+        continue-on-error: true
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
