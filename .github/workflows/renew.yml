@@ -27,17 +27,36 @@ jobs:
           curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/setup_proxy.sh" -o /tmp/setup_proxy.sh
           echo "126c9f2473f2e94bf1b8e1e1d09fa97eedeb1a80c3f110b90c4b59a58b8c9981  /tmp/setup_proxy.sh" | sha256sum -c -
 
-      - name: ⚙ 设置代理 (sing-box)
+      - name: ⚙ 设置代理 (sing-box，自动换节点)
         continue-on-error: true
         env:
-          NODE_LINK: ${{ secrets.NODE_LINK }}
+          HOME_SUB_URL: ${{ secrets.HOME_SUB_URL }}
         run: |
-          # 必须在工作区之外跑：actions/checkout 会「Deleting the contents of
-          # <workspace>」再 git init（run 44899606083 实测，clean: false 也拦不住），
-          # sing-box 二进制放在工作区根目录会被整个删掉。
+          # 单节点 NODE_LINK 是死节点（42.200.173.5:443 connection refused），
+          # 改成从住宅订阅里挑 TCP 可达的节点逐条试，最多 12 条（job 只有 20 分钟）。
+          # 必须在工作区之外跑：actions/checkout 会先 Deleting the contents of
+          # <workspace> 再 git init，sing-box 二进制放工作区会被删掉。
+          curl -fsSL "$HOME_SUB_URL" -A 'clash-verge/v2.0' -o /tmp/home_sub.yaml
+          curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/pick_node.py" -o /tmp/pick_node.py
+          python3 /tmp/pick_node.py /tmp/home_sub.yaml 12 > /tmp/nodes.txt
+          total=$(wc -l < /tmp/nodes.txt)
+          echo "候选节点数: $total"
+          if [ "$total" -eq 0 ]; then echo "没有可达节点，中止"; exit 1; fi
           mkdir -p /tmp/fdproxy
           cd /tmp/fdproxy
-          bash /tmp/setup_proxy.sh
+          n=0
+          ok=0
+          while IFS= read -r uri; do
+            n=$((n+1))
+            echo "──── 尝试节点 $n/$total ────"
+            if NODE_LINK="$uri" bash /tmp/setup_proxy.sh; then
+              ok=1
+              echo "✅ 节点 $n 连通"
+              break
+            fi
+            echo "节点 $n 不通，换下一个"
+          done < /tmp/nodes.txt
+          if [ "$ok" != "1" ]; then echo "❌ 所有候选节点都不通"; exit 1; fi
 
       - name: Checkout repository
         uses: actions/checkout@v6
