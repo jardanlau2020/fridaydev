@@ -42,6 +42,14 @@ BASE = "https://fridaydev.fr"
 SERVICES = f"{BASE}/services/"
 RENEW_EP = f"{BASE}/php/renew_free_service.php"
 
+# 探针硬超时（秒）。上一轮跑了 406 秒才发现拿不到 token，太浪费 CI。
+PROBE_TIMEOUT = int(os.environ.get("PROBE_TIMEOUT", "120") or 120)
+_DEADLINE = None
+
+
+def out_of_time() -> bool:
+    return _DEADLINE is not None and time.time() > _DEADLINE
+
 COOKIE = (os.environ.get("COOKIE") or "").strip()
 PROXY = (os.environ.get("PROXY_SERVER") or "").strip()
 HEADLESS = (os.environ.get("FD_HEADLESS") or "false").strip().lower() in ("1", "true", "yes")
@@ -215,8 +223,11 @@ def tg(text: str) -> None:
 
 
 def main() -> int:
+    global _DEADLINE
+    _DEADLINE = time.time() + PROBE_TIMEOUT
     print("#" * 46)
     print("   FridayDev Turnstile 只讀探針")
+    print(f"   硬超时：{PROBE_TIMEOUT}s")
     print("#" * 46)
     if not COOKIE:
         print("❌ 冇 COOKIE")
@@ -390,6 +401,9 @@ def main() -> int:
 
         # 嘗試 UC 模式點 widget 攞 token（唔提交任何嘢）
         for attempt in range(1, 4):
+            if out_of_time():
+                print(f"  ⏱️ 硬超时 {PROBE_TIMEOUT}s 到，停止重试，直接出结论", flush=True)
+                break
             st = state(sb)
             if st.get("token_len", 0) and st["token_len"] > 50:
                 token = "x" * st["token_len"]
@@ -412,6 +426,9 @@ def main() -> int:
             # managed/invisible widget 冇 checkbox，只能等 challenge 自己完成
             # （截圖見到「Verifying...」；之前等 32 秒唔夠，放寬到 120 秒）
             for _ in range(20):
+                if out_of_time():
+                    print(f"    ⏱️ 硬超时 {PROBE_TIMEOUT}s 到，不再等 challenge", flush=True)
+                    break
                 time.sleep(6)
                 st = state(sb)
                 if st.get("widget"):
@@ -437,11 +454,19 @@ def main() -> int:
                f"cf_iframes={final.get('cf_iframes')}｜turnstile_api={final.get('turnstile_api')}\n"
                "💡 即係「有頭 UC 瀏覽器 + 住宅出口」過得站方反機械人閘 → 可以考慮試全自動續期（要你拍板）")
     else:
+        cf_if = best.get("cf_iframes")
+        # cf_iframes=0 + widget 有渲染 + token 恒 0：说明 CF 根本没下发挑战 iframe
+        # （判定自动化环境后直接拒绝渲染挑战），不是选择器或点击坐标的问题。
+        verdict = ("❌ Turnstile 无法自动通过（CF 判自动化环境，拒绝下发挑战 iframe）"
+                   if cf_if == 0 else
+                   "❌ 拿不到 token（有 challenge iframe 但未通过，可能是点击/交互问题）")
         msg = ("🧪 FridayDev Turnstile 探針（只讀）\n"
-               f"❌ 攞唔到 token（token_len={best.get('token_len')}）\n"
-               f"閘狀態：428+sitekey={'✅' if sk else '❌'}｜widget={'✅' if best.get('widget') else '❌'}"
-               f"｜turnstile_api={best.get('turnstile_api')}｜cf_iframes={best.get('cf_iframes')}"
-               f"｜節點 {os.environ.get('PROXY_NODE','?')}")
+               f"{verdict}\n"
+               f"token_len={best.get('token_len')}｜428+sitekey={'✅' if sk else '❌'}"
+               f"｜widget={'✅' if best.get('widget') else '❌'}"
+               f"｜turnstile_api={best.get('turnstile_api')}｜cf_iframes={cf_if}"
+               f"｜節點 {os.environ.get('PROXY_NODE','?')}\n"
+               "💡 结论：这条路到此为止，改人工提醒；别再烧 CI 时间")
     print("\n" + msg.replace("**", ""))
     tg(msg)
     return 0 if ok else 2
