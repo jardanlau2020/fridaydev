@@ -920,44 +920,64 @@ def renew(page, context, cookie_pairs, cookie_raw, email, current_ip="未知") -
         handle_cloudflare(page, timeout=120)
 
         # 若续期动作触发了 CF/Turnstile 组件框，走基座的弹窗验证；Friday 的 fdCaptcha 在后续确认流程处理。
+        #
+        # ⚠️ Turnstile 没出票 ≠ 续期失败。2026-11-21 实测（run 44900394061 / 44901614212）：
+        # 点了 Renouveler gratuitement、Turnstile 90s 超时、脚本报「结果未知」，
+        # 但服务端照样把到期日从 23/11 加到 26/11 —— Turnstile 对续期 POST 是装饰性的。
+        # 所以这里只把「没出票」当过程指标记日志，不据此判失败，继续确认 + 到期日复核。
         cf_frame = page.locator(CF_IFRAME_SELECTOR)
         try:
             has_cf_frame = cf_frame.count() > 0 and cf_frame.first.is_visible(timeout=2000)
         except Exception:
             has_cf_frame = False
-        if has_cf_frame and not solve_modal_turnstile(page, timeout=90):
-            try:
-                page.screenshot(path="cf_fail.png")
-            except Exception:
-                pass
-            err = "CF 验证未通过（Turnstile 90s 未出票据），请检查节点纯净度后手动重试"
-            log(f"❌ {err}")
-            send_telegram_message(format_notification("❌ 续期失败", email=email,
-                                                      current_ip=current_ip, error=err))
-            result["summary"] = "❌ 续期失败（CF 验证未通过）"
-            return result
+        if has_cf_frame:
+            if not solve_modal_turnstile(page, timeout=90):
+                try:
+                    page.screenshot(path="cf_fail.png")
+                except Exception:
+                    pass
+                log("⚠️ Turnstile 90s 未出票（过程指标，不据此判失败；继续确认，判据看服务端到期日）")
 
         click_modal_confirm(page, tag)
         page.wait_for_timeout(3000)
         close_success_notice(page, tag)
         page.wait_for_timeout(5000)
-        try:
-            page.reload(wait_until="domcontentloaded", timeout=60000)
-        except Exception:
-            page.goto(SERVICES_URL, wait_until="domcontentloaded", timeout=60000)
-        handle_cloudflare(page, timeout=120)
-        page.wait_for_timeout(5000)
-        try:
-            new_text = page.locator("body").inner_text(timeout=10000)
-        except Exception:
-            new_text = ""
-        new_dates = extract_dates(new_text)
-        new_max = extract_renewal_date(page) or (max(new_dates) if new_dates else None)
-        ok = False
-        if old_max and new_max and new_max > old_max:
-            ok = True
-        elif "Actif" in new_text and "Suspendu" not in new_text and not find_not_yet_text(new_text):
-            ok = True  # 日期未变但状态活跃（可能续期即时生效无日期变化）
+
+        def _reload_and_read():
+            """刷新后重读正文 / 日期 / 续期日。服务端有延迟，调用方负责多轮复核。"""
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=60000)
+            except Exception:
+                page.goto(SERVICES_URL, wait_until="domcontentloaded", timeout=60000)
+            handle_cloudflare(page, timeout=120)
+            page.wait_for_timeout(5000)
+            try:
+                txt = page.locator("body").inner_text(timeout=10000)
+            except Exception:
+                txt = ""
+            dts = extract_dates(txt)
+            mx = extract_renewal_date(page) or (max(dts) if dts else None)
+            return txt, dts, mx
+
+        new_text, new_dates, new_max = _reload_and_read()
+        ok = bool(old_max and new_max and new_max > old_max)
+
+        # 复核窗口用 deadline 制，不裸写轮数：
+        #   每轮真实耗时 = sleep(90) + reload + handle_cloudflare(≤120s) + 15s ≈ 225s，
+        #   裸写 10 轮最坏 ≈37 分钟，会撞 job 的 timeout-minutes。
+        #   依据（2026-11-21 实测）：11:44:04 点续期 → 12:06:28 才读到 26/11，≥22 分钟，
+        #   所以给 25 分钟。
+        # old_max 为 None（续期前就没读到到期日）时直接跳过复核：没有基准，等了也判不出来。
+        if old_max is None:
+            log("ℹ️ 续期前未读到到期日，跳过复核（无基准可比）")
+        else:
+            deadline = time.time() + 25 * 60
+            while not ok and time.time() < deadline:
+                log(f"⏳ 日期未变，90s 后复核（剩余 {int(deadline - time.time())}s）")
+                time.sleep(90)
+                new_text, new_dates, new_max = _reload_and_read()
+                ok = bool(old_max and new_max and new_max > old_max)
+
         try:
             page.screenshot(path=shot)
         except Exception:
@@ -970,12 +990,34 @@ def renew(page, context, cookie_pairs, cookie_raw, email, current_ip="未知") -
                 new_due=new_max.strftime("%d/%m/%Y") if new_max else "（状态活跃）"), shot)
             result.update(ok=True,
                           summary=f"✅ 续期成功（到期 {new_max.strftime('%d/%m/%Y') if new_max else '活跃'}）")
-        else:
-            log("⚠️ 续期结果未知，请手动检查")
+        elif old_max is None:
+            # 续期前就没读到到期日（页面没加载出来 / CF 拦了 / inner_text 超时），
+            # 没有基准就无法比较 —— 这是「读不到」，不是「失败」，也不是成功。
+            # 不发光，归到告警层按天合并。这一档必须在「排队中」之前判，
+            # 否则会掉进后面的失败分支，把「读不到」报成「❌ 续期失败」。
+            log("ℹ️ 结果未知：续期前未读到到期日，无法判断是否续上")
+            result["summary"] = "ℹ️ 未知（未读到续期前日期）"
+        elif find_not_yet_text(new_text) and not not_yet:
+            # 日期还没变，但页面已经回到「Renouvelable dans N jour(s)」倒计时，
+            # 说明续期请求已经被受理、只是日期还没落库 —— 不算失败。
+            # `and not not_yet`：old_max 取的是全页 max()，倒计时可能来自另一张
+            # 服务卡片；点之前本来就有倒计时的话，这句不能当成本服务已提交的证据。
+            nxt = find_not_yet_text(new_text)
+            log(f"✅ 已提交，服务端排队中（页面已回到可续倒计时：{nxt}）")
             send_telegram_photo(format_notification(
-                "⚠️ 续期可能未成功", email=email, current_ip=current_ip, extra="请登录后台检查",
+                "✅ 已提交，服务端排队中", email=email, current_ip=current_ip,
+                extra=f"页面已回到「{nxt}后可续」，到期日暂未更新",
+                old_due=old_max.strftime("%d/%m/%Y") if old_max else ""), shot)
+            result.update(ok=True, summary=f"✅ 已提交，服务端排队中（{nxt}后可续）")
+        else:
+            # 走到这里一定满足 old_max 有值（未知档已在前面拦掉），
+            # 所以「日期未变」是真判据，不是「读不到」。
+            log("❌ 续期失败（点击+确认后复核到 deadline，日期仍未变，页面仍是续期按钮）")
+            send_telegram_photo(format_notification(
+                "❌ 续期失败", email=email, current_ip=current_ip,
+                error="点击并确认后复核到 deadline，到期日未变、页面仍是续期按钮",
                 old_due=old_max.strftime("%d/%m/%Y") if old_max else "（未获取到）"), shot)
-            result["summary"] = "⚠️ 结果未知（请手动检查）"
+            result["summary"] = "❌ 续期失败（日期未变）"
     else:
         log("ℹ️ 未找到续期按钮/倒计时，状态未知")
         send_telegram_message(format_notification(
