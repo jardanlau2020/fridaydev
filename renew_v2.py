@@ -50,6 +50,47 @@ def log(msg):
     print("[%s] %s" % (datetime.now(timezone.utc).strftime("%H:%M:%SZ"), msg), flush=True)
 
 
+STATE_FILE = "fd_notify_state.txt"
+NOTIFY_EVERY_DAYS = 3
+
+
+def _notify_allowed(key: str) -> bool:
+    """同一类状态每 NOTIFY_EVERY_DAYS 天最多提醒一次，避免天天吵。
+
+    key 例如 "login" / "services"，各自独立计时。
+    """
+    import datetime as _dt
+    import json as _json
+    today = _dt.date.today()
+    state = {}
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as fh:
+            state = _json.loads(fh.read() or "{}")
+    except Exception:
+        state = {}
+    last = state.get(key)
+    if last:
+        try:
+            if (today - _dt.date.fromisoformat(last)).days < NOTIFY_EVERY_DAYS:
+                return False
+        except Exception:
+            pass
+    state[key] = today.isoformat()
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as fh:
+            fh.write(_json.dumps(state, ensure_ascii=False))
+    except Exception:
+        pass
+    return True
+
+
+def notify_throttled(key: str, text: str) -> None:
+    if _notify_allowed(key):
+        notify(text)
+    else:
+        log("🔕 同类提醒已节流（每 %d 天一次）：%s" % (NOTIFY_EVERY_DAYS, key))
+
+
 def notify(text):
     if DRY_RUN or not TG_TOKEN or not TG_CHAT:
         log("TG(skip): " + text.replace("\n", " | ")[:300])
@@ -156,7 +197,11 @@ def main():
                     page.screenshot(path=SHOT, full_page=True)
                 except Exception:
                     pass
-                notify("🚨 FridayDev · 登入失敗\n%s\n請檢查 FD_EMAIL / FD_PASSWORD" % detail)
+                cur = page.url or ""
+                if "/404" in cur:
+                    detail = "%s（頁面被跳到 /404，站方改版或會話被清）" % detail
+                notify_throttled("login", "🚨 FridayDev · 登入失敗\n%s\n"
+                                 "請檢查 FD_EMAIL / FD_PASSWORD" % detail)
                 return 1
             log("✅ 登入成功: %s" % detail)
 
@@ -167,7 +212,21 @@ def main():
 
             if not info.get("service_id"):
                 page.screenshot(path=SHOT, full_page=True)
-                notify("🚨 FridayDev · 讀唔到服務卡（/services/ 結構可能又改）")
+                cur = page.url or ""
+                if "/404" in cur or "/login" in cur:
+                    # 未登入/会话失效时前端会把页面跳到 /404 或 /login。
+                    # 那不是「结构改了」，是会话没了 —— 报准，别误导人去改选择器。
+                    why = "被跳到 /404" if "/404" in cur else "被跳到 /login"
+                    log("❌ 會話失效（%s）：%s" % (why, cur))
+                    notify_throttled("services",
+                                     "🚨 FridayDev · 會話失效（%s）\n"
+                                     "登入成功但 /services/ 被彈走，多半係站方清咗會話\n"
+                                     "本輪唔重試；同一狀態每 %d 天才提醒一次"
+                                     % (why, NOTIFY_EVERY_DAYS))
+                else:
+                    log("❌ 讀唔到服務卡（頁面結構可能又改）：%s" % cur)
+                    notify_throttled("services",
+                                     "🚨 FridayDev · 讀唔到服務卡（/services/ 結構可能又改）")
                 return 1
 
             days = info.get("days_left")
