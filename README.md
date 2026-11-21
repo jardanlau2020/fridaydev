@@ -1,183 +1,49 @@
-# fridaydev
+## 🚀 Friday 自动续期（GitHub Actions，单账号 Cookie 版）
 
-FridayDev（fridaydev.fr）免费服务自动续期 —— **全自動 `renew` 模式**（2026-10-06 起）。
+定时登录 [Friday](https://fridaydev.fr/services/) 自动续期免费服务（5 天手动续一次，脚本每天巡检）。
 
-每日跑一次（`cron: '5 7 * * *'`，即 UTC 07:05 / 北京 15:05）：页面有续期按钮就点，
-未到可续窗口就 skip（**不点**）。续期成功、或剩 ≤2 天仍未可续，都会发 Telegram。
+### 🔐 Secrets 配置说明
 
-> ⚠️ 上面那个钟点**只是 cron 里写的**。GitHub 的 `schedule` 触发器是 best-effort，
-> 免费 runner 上会排队 —— 实测（run #21–#31）落地时间全在 UTC 12:40–15:19
-> （北京 20:40–23:19），迟 5.5–8 小时，偶尔更晚。可续窗口跨越多日而每日都跑
-> 一次，晚到无害；但如果你要它落在某个具体钟点，得把 cron 往前挪几小时补偿。
+| Secret 名称   | 是否必填 | 说明                                                        |
+|---------------|----------|-------------------------------------------------------------|
+| COOKIE_VALUE  | ✅ 必填（旧 COOKIE 兼容） | Friday(fridaydev.fr) 登录 Cookie；首选填 `remember_web_59ba36addc2b2f9401580f014c7f58ea4e30989d=xxx`，可再附 `; user_id=yyy`；也可只填值 |
+| EMAIL         | ❌ 可选  | 通知用备注名，可随意填写                                    |
+| GH_TOKEN      | ❌ 可选  | GitHub(classic) token，用于 Cookie 刷新后自动回写，以 `ghp_` 开头 |
+| NODE_LINK     | ❌ 可选  | 代理链接（vless/vmess/trojan/hysteria2/tuic/anytls/socks5 等） |
+| TG_BOT_TOKEN  | ❌ 可选  | Telegram Bot Token（用于发送通知，含截图）                  |
+| TG_CHAT_ID    | ❌ 可选  | Telegram Chat ID（接收通知的用户或群组 ID）                 |
 
-## 为什么以前默认不自动续期（以及 2026-10-06 改了什么）
+> * 长凭证是 `remember_web_` 打头的那条（后缀随站点配置变，脚本按前缀认，不用你改代码）；剩余不足 3 天会 TG 预警，彻底失效时 TG 告警"Cookie 已失效"，需手动重拷。
+> * 站点若还在种 `PHPSESSID` / `user_id`，一起贴进来也照样兼容，脚本每次跑通会自动回写最新串。
+> * 账密备用登录为二期扩展位，MVP 仅 Cookie 登录。
 
-站点对免费续期强制 Cloudflare **Turnstile 互动验证**（`/php/renew_free_service.php`
-返回 HTTP 428 + `captcha_required`，前端用 `window.fdCaptchaSolve()` render widget）。
-无 token 时前端弹 `alert("Renouvellement impossible.")` 然后按钮复位 ——
-旧版脚本把这种「点完没反应」当成续期成功，报了一堆假绿。
+━━━━━━━━━━━━━━━━━━━━━━
 
-在 GHA runner IP 上实测过不去，累计试过：
+## 部署步骤
 
-- 5 种引擎：playwright / patchright / camoufox / seleniumbase UC / nodriver
-- 真人鼠标序列（`human_click()`：分段移动 + 0.12s 按住）
-- 20 组出口 × UA 组合
+1. 新建仓库（建议名 `Friday-Renew`），把 `app.py`、`.github/workflows/renew.yml`、`README.md` 推上去，在 Actions 菜单允许工作流。
+2. 在 `Settings` ➡ `Secrets and variables` ➡ `Actions` 里添加上方 Secrets。
+3. 去 Actions 手动试运行一次；cron 为每天 UTC 7 点（北京时间 15 点），可按需调整。
 
-结论（2026-09-24）：继续每日自动点只会制造红灯和假信号，降级为 watchdog。
-想再试就手动 dispatch 并选 `mode=renew`。
+### COOKIE 获取
 
-### 2026-10-06：改回全自動 renew
+1. 浏览器登录 https://fridaydev.fr/ （登录时勾上"记住我"之类的选项，否则只有两小时会话 Cookie）。
+2. 按 F12 ➡ 应用程序（Application）➡ 左侧 Cookie ➡ `https://fridaydev.fr`。
+3. 找到 `remember_web_59ba36addc2b2f9401580f014c7f58ea4e30989d` 那条（名称以 `remember_web_` 开头，过期时间在未来几个月的那条就是它），值原样复制、不要解码，拼成：
+   `remember_web_59ba36addc2b2f9401580f014c7f58ea4e30989d=xxx`，填入 `COOKIE_VALUE`；若还看得到 `user_id`，一并附上写成 `remember_web_59ba36addc2b2f9401580f014c7f58ea4e30989d=xxx; user_id=yyy`。
 
-新证据（run `35510050597` 原始 log）：上面那批「5 引擎全败」的测试**全部跑在
-`headless=True` 下** —— 428 已经拿到 captcha_site_key，但页面里
-`window.turnstile` 全程 `undefined`、`iframes=[]`，即 widget **根本没渲染**，
-不是网络被拒。换成 HidenCloud（10-05 在同一台 GHA runner 成功过闸）的配方：
+> * 别拷成 `control.fridaydev.fr`（Pterodactyl 面板）下的同名 Cookie 了，面板那条只在面板有效，脚本会在日志里提示"auth.php 返回未登录"。
 
-- `xvfb-run --server-num=99` 提供真显示（`DISPLAY=:99`）
-- `channel="chrome"` 起**真 Chrome**（起不到就退回 chromium，但保持有头，不静默变回 headless）
-- `headless=False` + `STEALTH_JS`
+### 获取 `GH_TOKEN`
 
-实测（run `37348520733` / `37350294906`，均 success）：
-`[INFO] 引擎 = 真 Chrome（channel=chrome, headless=False）` → Cookie 有效 →
-面板读取正常。用户拍板「改做 renew → 全自動」，`FD_MODE` 默认改 `renew`。
+参考 Bothosting-Renew：GitHub 头像 ➡ Settings ➡ Developer settings ➡ Personal access tokens(classic) ➡ Generate new token(classic)，权限勾 repo 相关即可。
 
-> ⚠️ **Turnstile 仍未被真正触发过。** 上面两单跑的时候面板显示
-> `Renouvelable dans 3 jour(s)`、没有续期按钮，脚本按设计 skip 了。
-> 首次真实验证要等可续窗口开（下次 **2026-10-08**）。在那之前，「有头能过
-> Turnstile」只是合理推断加上 HidenCloud 先例，**还不是本仓的实证** ——
-> 别把它当成已解决。
+## 注意事项
 
-> 引擎首选 **patchright**（undetected Playwright）。证据：weirdhost 探针
-> run 35501369694 —— 同一段点击代码，普通 playwright 点完 71 秒无反应，
-> patchright 一点即有 `cf_clearance`。指纹差异就是 CF 认不认你。
+* Friday 免费档续期按钮双态：未到时间显示倒计时 `Renouvelable dans N jour(s)`，只通知不点；到期后同一位置文案会变化（如 `Renouveler gratuitement (N jours)`），那才是入口——点后弹 CF 验证组件（Turnstile），节点纯净自动过盾即默认续期完成。浏览器 headful 跑在 xvfb 上（Turnstile 需真渲染）。真点了但日期没变才报"可能未成功"人工检查。
+* cron 运行时间不一定准时，以 Actions 实际触发为准。
 
-## 续期矩阵
+## ⚠️ 免责声明
 
-| 模式 | 触发 | 行为 | 退出码 |
-|---|---|---|---|
-| `renew`（默认，2026-10-06 起） | schedule / dispatch | 有续期按钮才点，未到窗口 skip | 成功 0；失败 1 |
-| `watchdog` | 仅手动 dispatch 揀 | 只读倒计时，剩 ≤5 天发 TG | 未到窗口 0；**进入窗口 1**（提醒你去点） |
-
-`renew` 的静默约定：未到窗口且倒计时 **>2 天**一条消息都不发；剩 ≤2 天才出声。
-`watchdog` 的静默约定：倒计时 **>5 天**一条消息都不发。天天收「还早」就是噪音，
-看久了就会开始忽略 —— 那提醒就废了。剩 ≤3 天时第二行会从「未到續期窗口」
-升级成「續期窗口即將開啟」。
-
-### skip 文案的三处出口（已修复）
-
-迁移时这里原本有个**已知文案缺陷**，被 `B3d / B5c / B14c` 三条断言钉住原样保留。
-迁移验收绿了之后单独修掉了，现在三处出口分开建模、不再靠正则拆散文：
-
-| 出口 | 判据 | 渲染出来 |
-|---|---|---|
-| watchdog 进窗口 | `open_now=True` | `🔔 … · 續期窗口已開` / `ℹ️ 面板 MM-DD 到期 · 請人手撳「Renouveler gratuitement」` |
-| watchdog 剩 ≤3 天 | `human=True` | `🟢 … · 狀態良好（剩 N 日）` / `ℹ️ 面板 MM-DD 到期 · 續期窗口即將開啟` |
-| renew 剩 ≤2 天 | `note="下次自動續"` | `🟢 … · 狀態良好（剩 N 日）` / `ℹ️ 下次自動續` |
-
-**原缺陷**（值得记一笔，因为它不是排版洁癖而是真会丢服务器）：`build_tg()` 处理
-`skip` 时只从 `detail` 里正则抽「仲有 X 日」，括号里逗号之后那句被整个丢掉。于是
-「窗口已经开了、去手点」那条——**全系统唯一一条要人行动的通知**——渲染成：
-
-```
-🟢 FridayDev · 狀態良好
-ℹ️ 面板 10-07 到期 · 續期窗口即將開啟
-```
-
-窗口都开了还说「即將開啟」，抬头还说「狀態良好」。看通知的人划走，第二天收到同一条，
-再划走 —— 直到服务器到期被删。真正起作用的提醒只剩 **job 标红**本身。
-
-修法：给「窗口已开」单开 `open_now=True` 出口（🔔 抬头 + 明写要手点）；「窗口没开、
-只是 ≤3 天预备提醒」保持 🟢 且**只**升到「即將開啟」（这会儿页面上没有按钮，
-叫人去撳是错的——原来 `run()` 传的 `要人手撳` 那句本身就是错的，现在连传都不传）；
-renew 模式的「下次自動續」用 `note=` 带出来。`A12c` / `A12g` 两条断言保证
-🔔 那条不会同时出现「狀態良好」或「即將開啟」、`open_now` 优先级高于 `human`。
-
-## renew-kit
-
-脚本与 workflow 都走 [renew-kit](https://github.com/jardanlau2020/renew-kit) `v0.5.3`：
-
-```yaml
-uses: jardanlau2020/renew-kit/.github/actions/renew@v0.5.3
-```
-
-依赖安装 / renewkit 注入 / 失败兜底统一由公共骨架处理，本仓库只管业务逻辑。
-`notify-on-failure` 设为 `false` —— 脚本对每种结局都已经自己发过 TG，兜底会重复。
-
-### 迁到 renew-kit 改了什么
-
-| 原来 | 现在 |
-|---|---|
-| 自己读 `TG_BOT_TOKEN` / `TG_CHAT_ID` 拼 urlencode | `renewkit.notify.send(text, parse_mode="HTML")` |
-| 各仓库各写一份 DRY_RUN 闸门 | 闸门只在 `notify.send()` 一处（`DRY_RUN=1` 只打印不发） |
-| `_clip(t, limit)` | `renewkit.shorten` |
-| `now_local()` | **删掉** —— 原文件定义了但从没调用过，纯死代码 |
-| 模块级 `if not COOKIE: sys.exit(1)` | 挪进 `main()`。原来那是 import 期副作用，没 COOKIE 时 `import renew` 直接退进程，验收 harness 连模块都载不进来 |
-| `run()` 里 3 处裸 `sys.exit(...)` | 改成 `return` 状态字，退出码统一由 `main()` 算 |
-| 退出码 `0/1/2/3` | 收敛成 `0/1`（只有 `FAILED` 才 1） |
-| 5 条出口里 3 条靠显式 `browser.close()` | 收敛到 `finally`，任何出口都不漏关 |
-| `import json / os / urllib.*` | 删掉（迁移后已无人使用） |
-
-退出码语义变化（有意为之）：
-
-- `mode=watchdog` 撞上续期窗口：原来 `exit 2`，现在 `exit 1`。「红」这个信号保留
-  —— job 照样标红提醒你去点，只是收敛到统一语义。
-- cookie 失效：原来 `exit 3`，现在 `1`。
-
-状态字到 renew-kit 结果语义的映射见 `renew.py` 的 `_STATUS_OUTCOME`：
-
-| status | Outcome | 说明 |
-|---|---|---|
-| `ok` | `RENEWED` | 本次确实续上了 |
-| `skip` | `SKIPPED` | 未到窗口 / watchdog 读数「还早」 |
-| `manual` | `FAILED` | **进窗口了，必须人手点**。不是「读不到结果」，也不是「重试就好」的上游抖动 —— 是每次都会撞上的硬闸门。映射成非 `FAILED` 就是永久绿灯，watchdog 白装 |
-| `cookie` | `FAILED` | Cookie 失效，要换 secret |
-| `fail` | `FAILED` | 点不到按钮 / API 未回 success |
-| `error` | `FAILED` | 未捕获异常 |
-
-## 手动触发
-
-```
-Actions → Auto Renew FridayDev Service → Run workflow
-  mode:    renew（默认，真点续期） / watchdog（只读，不点）
-  dry_run: true  → 只检查、不发 TG（用来验证流程与文案）
-```
-
-`dry_run` 下 `renewkit.notify.send()` 会把「本轮本应发送」的原文整条打出来，
-但一个字节都不发出去 —— 所以演练时看日志就能确认通知内容对不对。
-
-## 目录结构
-
-```
-renew.py                            续期 / 守门主脚本
-.github/workflows/renew.yml         每日守门 + 手动 dispatch
-.verify/verify_fridaydev.py         验收 harness（真子进程 + 场景矩阵）
-```
-
-## 验收测试
-
-```bash
-pip install pytest          # 可选，harness 自己也能跑
-export RENEWKIT_PATH=/path/to/renew-kit     # 不在同工作区时才需要
-python .verify/verify_fridaydev.py
-```
-
-覆盖四段：纯逻辑（`build_tg` / `parse_cookies` / 状态字映射）、watchdog 与 renew
-的场景矩阵、workflow 与代码的接线一致性、以及**真子进程**跑一次 `main()`。
-当前 **229 项全绿**（`✅ 全部通过（229 项）`）。
-
-> harness 会给自己换一个假 `time` 模块（`sleep()` 空操作、`time()` 每次调用往前
-> 跳 5 秒），否则脚本里的 `time.sleep(4)` 和那个 30 次「等 API 回包」轮询会让
-> 每个 renew 场景真跑 40 秒起。跑的时候把依赖目录挂上 `PYTHONPATH`（绝对路径，
-> `[D]` 段会开真子进程、相对路径会失效）：
->
-> ```bash
-> PYTHONPATH=/abs/path/to/_deps python .verify/verify_fridaydev.py
-> ```
-
-## Secrets
-
-| 名称 | 必需 | 说明 |
-|---|---|---|
-| `COOKIE` | ✅ | fridaydev.fr 的 Cookie 串（`a=1; b=2`） |
-| `TG_BOT_TOKEN` | 建议 | 不配就静默跳过通知 |
-| `TG_CHAT_ID` | 建议 | 同上 |
+* 本程序仅供学习了解，非盈利目的。
+* 遵守部署服务器所在地、所在国家和用户所在国家的法律法规，作者不对使用者任何不当行为负责。

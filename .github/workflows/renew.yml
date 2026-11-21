@@ -1,158 +1,122 @@
-name: Auto Renew FridayDev Service
-
-# 2026-10-02：改用 renew-kit 的 composite action（依赖安装 / renewkit 注入 /
-# 失败兜底统一走公共骨架）。脚本本身同日迁到 renewkit，退出码从 0/1/2/3
-# 收敛成 0/1 —— 见 renew.py 顶註。
-#
-# 模式说明（2026-10-06 起）：
-#   renew（默認）= 自動續期。續期按鈕只會喺可續窗口內先出現，未到窗口照樣
-#                 skip 唔撳；Turnstile 由「有頭真 Chrome + xvfb」跑（見 setup-command）。
-#   watchdog     = 只讀狀態 + 到期前 TG 提醒，唔撳任何嘢（要只讀先人手 dispatch 揀）。
-#
-# 點解以前 default 係 watchdog（保留俾以後嘅自己睇）：
-# 2026-09-24 起「GHA 每日自動撳只會製造紅燈」，實證 run 35510050597 ——
-# 428 攞到 captcha_site_key，但頁內 window.turnstile 全程 undefined、
-# iframes=[]，即 Turnstile 喺 **headless** Chromium 下根本唔 render。
-# 2026-10-06 改用 xvfb + channel="chrome" + headless=False（HidenCloud 10-05
-# 同款配方），實測引擎起得到、面板讀得到，用戶拍板「改做 renew → 全自動」。
-#
-# ❌ 2026-10-08 窗口真跑：**Turnstile 證實過唔到**（呢個就係等緊嘅答案）。
-#    證據 run 37793164201（排程）＋ 37796323617（移植 frame 樹反查後 dispatch）：
-#      · 窗口確實開住：搵到並撳到「Renouveler gratuitement (5 jours)」
-#      · 引擎齊：patchright + 真 Chrome + headless=False + xvfb（log 有印）
-#      · frame 樹反查成功：[FRAMES] challenge 命中 1，撳到正確 iframe
-#      · 但挑戰本身判敗：`Le test a échoué. Rechargez la page et réessayez.`
-#        token 永遠 0 → API 回 428 captcha_required
-#    判斷：唔係代碼問題，係環境被 Cloudflare 判失敗（唔撳 25 秒無事、一撳
-#    3 秒即敗；兩種撳法皆敗）→ 同 Weirdhost 同一家族。
-#    ⇒ 用戶拍板（2026-10-08）**排程改返 watchdog**：唔再每日發假紅，
-#      剩 ≤2 日先提醒人手上面板撳。renew 模式仍留喺 dispatch inputs。
-#      未解決之前唔好再改返 renew 做默認。
+name: Auto Renew Friday
 
 on:
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: 'watchdog = 只讀+到期提醒（默認，2026-10-08 起）；renew = 試自動續期（實測 Turnstile 過唔到）'
-        required: false
-        default: 'watchdog'
-        type: choice
-        options:
-          - watchdog
-          - renew
-      dry_run:
-        description: '只檢查不發 TG（用來驗證流程與文案）'
-        type: boolean
-        default: false
   schedule:
-    # 2026-10-08 起：排程 = watchdog（只讀 + 到期提醒，唔撳任何嘢）。
-    # 原因：10-08 窗口真跑證實 Turnstile 過唔到（見頭註），renew 只會製造
-    # 每日假紅。通知節奏：剩 ≤2 日先 TG 提你人手上面板撳；>2 日靜默。
-    # （2026-10-06 → 2026-10-08 期間曾改 renew 全自動，已回退。）
-    #
-    # cron 写的是 UTC 07:05（北京 15:05），但**别指望这个时间**：
-    # GitHub 的 schedule 触发器是 best-effort，免费 runner 上会排队。
-    # 实测落地时间（run #21–#31）全在 UTC 12:40–15:19，即北京 20:40–23:19，
-    # 迟 5.5–8 小时，偶尔更晚。可續窗口跨越多日而每日都會跑一次，所以遲
-    # 幾小時有補償空間、無害；真要它落在某个钟点，得把 cron 往前挪几小时来补偿。
-    - cron: '5 7 * * *'
-
-# 原来这里写着 `permissions: actions: write`，但本仓库没有任何一步调 GitHub API
-# （既不做 cron 回写，也没有清理运行记录）—— 那是一条没人用的额外授权，
-# 第三方 action 也能继承。删掉，只留 checkout 需要的默认 contents: read。
+    - cron: '30 23 * * 5'
+  workflow_dispatch:
 
 jobs:
-  renew:
-    name: FridayDev 續期守門
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  Renew-friday:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v7
+      # 代理步骤挪到 Checkout 之前（冷王改动 2）：Checkout 带
+      # persist-credentials: true，token 会落进 .git/config；脚本能写
+      # $GITHUB_ENV（存档版第 11、462、463 行），顺序反了就能劫持后面
+      # 握着 COOKIE_VALUE / GH_TOKEN / TG_BOT_TOKEN 的那一步。
+      #
+      # 脚本不再从第三方站点拉：用我们仓库里固定 commit 的
+      # .github/scripts/setup_proxy.sh，再对内容做 sha256 校验。
+      #
+      # 校验单独一步、不带 continue-on-error：脚本被改 → 硬停。
+      - name: ⬇ 取回并校验代理脚本
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/setup_proxy.sh" -o /tmp/setup_proxy.sh
+          echo "126c9f2473f2e94bf1b8e1e1d09fa97eedeb1a80c3f110b90c4b59a58b8c9981  /tmp/setup_proxy.sh" | sha256sum -c -
 
-      - name: ♻️ 恢复告警状态（一天一条）
-        uses: actions/cache/restore@v4
-        with:
-          path: fd_alert_state.json
-          key: fdalert-${{ github.run_id }}
-          restore-keys: |
-            fdalert-
-
-      - name: 运行续期脚本（renew-kit）
-        uses: jardanlau2020/renew-kit/.github/actions/renew@v0.5.3
+      - name: ⚙ 设置代理 (sing-box)
+        continue-on-error: true
         env:
-          # 2026-11-19：站方改版，cookie 方案作廢 → 改用帳密即場登入
-          FD_EMAIL: ${{ secrets.FD_EMAIL }}
-          FD_PASSWORD: ${{ secrets.FD_PASSWORD }}
+          NODE_LINK: ${{ secrets.NODE_LINK }}
+        run: |
+          # 必须在工作区之外跑：actions/checkout 会「Deleting the contents of
+          # <workspace>」再 git init（run 44899606083 实测，clean: false 也拦不住），
+          # sing-box 二进制放在工作区根目录会被整个删掉。
+          mkdir -p /tmp/fdproxy
+          cd /tmp/fdproxy
+          bash /tmp/setup_proxy.sh
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: true
+          # 代理步骤在 Checkout 之前，sing-box 二进制 / 配置是未跟踪文件；
+          # 默认 clean: true 会跑 git clean -ffdx 把它们清掉，后面版本核对
+          # 就会 ./sing-box: No such file。runner 每次全新，关掉安全。
+          clean: false
+
+      - name: ⚙ 设置 Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: 🔍 静态检查（未定义变量，如 NameError 类 bug）
+        run: |
+          pip install ruff
+          ruff check --select F821,F822,F823 app.py
+
+      - name: 🛠️ 安装系统依赖和 Python 依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb jq wget
+          pip install patchright requests 'requests[socks]'
+          python -m patchright install --with-deps chrome
+
+      - name: 🔎 核对 sing-box 版本
+        run: |
+          if [ ! -x /tmp/fdproxy/sing-box ]; then
+            if [ "${IS_PROXY:-false}" = "true" ]; then
+              echo "IS_PROXY=true 但 /tmp/fdproxy/sing-box 不存在"; exit 1
+            fi
+            echo "[WARN] 没有 sing-box（直连模式），跳过版本核对"; exit 0
+          fi
+          /tmp/fdproxy/sing-box version | grep -q "1.14.4" || { echo "sing-box 版本不符，中止"; exit 1; }
+
+      - name: 🚀 运行续期脚本
+        env:
+          COOKIE: ${{ secrets.COOKIE }}
+          COOKIE_VALUE: ${{ secrets.COOKIE_VALUE }}
+          EMAIL: ${{ secrets.EMAIL }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          # 默認 watchdog（2026-10-08 起）。排程觸發時 inputs 為空 → 落到
-          # 'watchdog'，即只讀 + 到期提醒；要真試續期先人手 dispatch 揀 mode=renew。
-          FD_MODE: ${{ inputs.mode || 'watchdog' }}
-          # 代理出口（2026-10-08 加）：setup_proxy.sh 用 NODE_LINK 起 sing-box →
-          # 寫 PROXY_SERVER=socks5://127.0.0.1:1080 入 $GITHUB_ENV → renew.py 開
-          # context 時帶 proxy。目的：試「Turnstile 失敗係唔係 GHA runner IP 問題」。
-          # 冇設 secret 就照舊直連，唔會爆。
-          NODE_LINK: ${{ secrets.NODE_LINK }}
-          # 2026-10-17 加：改用 cfnew 家宽「訂閱」逐條試揀（舊 NODE_LINK 單節點 42.200.173.5
-          # 已死 → i/o timeout → 回退直連機房 IP → CF 腳本載唔到 → 續期失敗，run 39018711788）。
-          SUB_URL: ${{ secrets.SUB_URL }}
-          # 演练开关：renewkit.notify.send 里唯一的闸门，设了就只打印不发。
-          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
-          # 有頭用嘅虛擬顯示（xvfb-run --server-num=99 同呢個數字對齊）。
-          # 規程：起咗 Xvfb 但冇 DISPLAY = 白起。
-          DISPLAY: ':99'
-        with:
-          script: renew_v2.py
-          python-version: "3.10"
-          renewkit-ref: v0.5.3
-          pip-packages: playwright patchright
-          # Xvfb：Turnstile 喺 headless Chromium 拒絕渲染（run 35510050597：
-          # window.turnstile 全程 undefined、iframes=[]），要用有頭先會 render。
-          apt-packages: xvfb
-          # 用 xvfb-run 包住跑 → DISPLAY 由佢設定，配合 env DISPLAY=:99。
-          # 對齊 HidenCloud 10-05 嗰單成功配方（xvfb + 真 Chrome + headed）。
-          command: xvfb-run --server-num=99 -s "-screen 0 1920x1080x24" python -u renew_v2.py
-          # 浏览器安装放这里，跟迁移前逐条对齐：
-          #   · playwright install chromium        —— 主引擎
-          #   · playwright install-deps chromium   —— 系统库（内部自己 sudo）
-          #   · patchright 自帶 Chromium（唔會同 playwright 撞），ARM 失敗會自己報錯
-          #   · 真 Chrome（channel="chrome"）—— ubuntu-latest 預裝；冇就要講俾我哋知，
-          #     否則腳本會靜默退回 chromium，「有頭真 Chrome」呢半邊就白做。
-          # setup-continue-on-error 设 false：迁移前这几条失败就是硬失败，
-          # 不改成软失败（软失败只会把问题推迟到脚本里，报错更难读）。
-          setup-command: |
-            # 2026-10-08：先起代理（NODE_LINK → sing-box → socks5:1080）。
-            # 失敗唔硬死 —— 退返直連，等腳本照跑並留低證據。
-            # 2026-10-17：改用訂閱逐條試揀住宅出口（setup_residential.sh）。
-            # 揀唔到都唔硬死 —— 直連照跑，等腳本留低證據。
-            bash ./setup_residential.sh || echo '[WARN] 住宅出口揀唔到節點，回退直連（CF 大機會載唔到）'
-            playwright install chromium
-            playwright install-deps chromium
-            python -m patchright install chromium || echo '[WARN] patchright chromium 裝唔到，會退回 playwright'
-            echo "── 真 Chrome 檢查（channel=chrome 要用）──"
-            google-chrome --version || google-chrome-stable --version || echo "[ERROR] runner 冇真 Chrome，會退回 chromium"
-            command -v xvfb-run && xvfb-run --help 2>&1 | head -2
-          setup-continue-on-error: "false"
-          # 关掉 action 的兜底通知：脚本对每种结局（cookie 失效 / 点唔到按钮 /
-          # API 未回 success / 未捕获异常）都已经自己发过 TG，兜底那条会重复。
-          notify-on-failure: "false"
-          # 产物上传不用 action 的（它只在 failure() 时传）；本仓库迁移前是
-          # `if: always()`，见下面单独那步。
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python -u app.py
 
-      - name: 💾 保存告警状态
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: fd_alert_state.json
-          key: fdalert-${{ github.run_id }}
+      # 更新时间到 time.txt，避免 6 个月未更新导致工作流暂停
+      - name: 🕒 更新时间
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')" > time.txt
+          git add time.txt
+          if git diff --cached --quiet; then
+            echo "No need to commit"
+          else
+            git commit -m "⏱️ Auto Update by Github Actions $(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')"
+            git push origin main
+          fi
 
-      - name: 上传截图产物
-        # 迁移前就是 always()：成功那次的截图同样有参考价值（比如看「未到窗口」
-        # 时面板到底长什么样）。所以不走 action 的失败才传。
+      - name: 📸 上传结果截图
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
-          name: fridaydev-screenshot
+          name: friday-result
           path: result.png
           if-no-files-found: ignore
+
+      - name: 🧽 清理进程和临时文件
+        if: always()
+        run: |
+          pkill -f sing-box || true
+          pkill -f patchright || true
+          pkill -f chrome || true
+          pkill -f Xvfb || true
+          rm -f sing-box sing-box-config.json sing-box.log result.png
+          rm -rf /tmp/fdproxy
+
+      # 原来这里有一整步「清理旧的工作流运行记录」，把历史 run 删到只剩 1 条，
+      # 出事连审计证据都没了 —— 已整步删除，不保留任何自动删除。
