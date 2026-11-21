@@ -1,6 +1,12 @@
 # -*- coding: utf-8 -*-
 """从 Clash YAML 订阅里挑出 sing-box 能用的节点，按 TCP 延迟排序后逐行输出 URI。
 
+⚠️ 延迟快 ≠ 出口干净。本脚本只做 TCP 连通性排序，**不能**当作「可用节点」的
+最终判据：2026-11-21 实测，按延迟排出的前 19 条出口全是 Cloudflare WARP
+（104.28.x / AS13335 / proxy=true），Turnstile 一条票都不给。
+调用方必须对每个候选再查一次出口身份（ip-api 的 hosting / proxy 字段），
+hosting=true 或 proxy=true 的直接跳过，见 renew.yml 的「逐节点验出口纯净度」。
+
 用法: python3 pick_node.py <clash_yaml> [最大输出条数]
 只输出 vless / trojan（openvpn 等 sing-box 不支持的跳过）。
 不联网、不打印凭据到 stderr，URI 逐行写 stdout 供 shell 循环消费。
