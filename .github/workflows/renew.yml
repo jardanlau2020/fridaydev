@@ -70,13 +70,13 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v7
 
-      - name: ♻️ 恢复提醒节流状态
+      - name: ♻️ 恢复告警状态（一天一条）
         uses: actions/cache/restore@v4
         with:
-          path: fd_notify_state.txt
-          key: fdnotify-${{ github.run_id }}
+          path: fd_alert_state.json
+          key: fdalert-${{ github.run_id }}
           restore-keys: |
-            fdnotify-
+            fdalert-
 
       - name: 运行续期脚本（renew-kit）
         uses: jardanlau2020/renew-kit/.github/actions/renew@v0.5.3
@@ -140,12 +140,12 @@ jobs:
           # 产物上传不用 action 的（它只在 failure() 时传）；本仓库迁移前是
           # `if: always()`，见下面单独那步。
 
-      - name: 💾 保存提醒节流状态
+      - name: 💾 保存告警状态
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: fd_notify_state.txt
-          key: fdnotify-${{ github.run_id }}
+          path: fd_alert_state.json
+          key: fdalert-${{ github.run_id }}
 
       - name: 上传截图产物
         # 迁移前就是 always()：成功那次的截图同样有参考价值（比如看「未到窗口」

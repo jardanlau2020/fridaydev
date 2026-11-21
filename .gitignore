@@ -28,3 +28,7 @@ htmlcov/
 *.log
 *.png
 latest_logs/
+
+# ── 告警节流状态（2026-11-21：由 actions/cache 持久化，不入库）────────────
+fd_alert_state.json
+fd_notify_state.txt
