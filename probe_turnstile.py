@@ -87,7 +87,8 @@ LOADCF_JS = (
 BTN_JS = (
     "var bs=document.querySelectorAll('button,a');var out=[];"
     "for(var k=0;k<bs.length;k++){var t=(bs[k].innerText||'').trim();"
-    "if(/renouvel/i.test(t)){out.push(t.slice(0,40)+(bs[k].disabled?' [disabled]':''));}}"
+    "var c=String(bs[k].className||'');"
+    "if(/renouvel/i.test(t)||/js-free-renew/.test(c)){out.push(t.slice(0,40)+(bs[k].disabled?' [disabled]':''));}}"
     "return JSON.stringify(out);"
 )
 
@@ -110,7 +111,8 @@ API_JS = "return JSON.stringify(window.__fdapi||[]).slice(0,1500);"
 BTN_INFO_JS = (
     "var bs=document.querySelectorAll('button,a');var out=[];"
     "for(var k=0;k<bs.length;k++){var t=(bs[k].innerText||'').trim();"
-    "if(/renouvel/i.test(t)){out.push({tag:bs[k].tagName,disabled:!!bs[k].disabled,"
+    "var c=String(bs[k].className||'');"
+    "if(/renouvel/i.test(t)||/js-free-renew/.test(c)){out.push({tag:bs[k].tagName,disabled:!!bs[k].disabled,"
     "cls:String(bs[k].className).slice(0,60),onclick:String(bs[k].getAttribute('onclick')||'').slice(0,160),"
     "data:Array.prototype.slice.call(bs[k].attributes).map(function(a){return a.name+'='+String(a.value).slice(0,60);}).join('|').slice(0,300)});}}"
     "return JSON.stringify(out);"
@@ -118,20 +120,22 @@ BTN_INFO_JS = (
 ENABLE_JS = (
     "var bs=document.querySelectorAll('button,a');var n=0;"
     "for(var k=0;k<bs.length;k++){var t=(bs[k].innerText||'').trim();"
-    "if(/renouvel/i.test(t)){bs[k].removeAttribute('disabled');bs[k].disabled=false;"
+    "var c=String(bs[k].className||'');"
+    "if(/renouvel/i.test(t)||/js-free-renew/.test(c)){bs[k].removeAttribute('disabled');bs[k].disabled=false;"
     "bs[k].classList.remove('disabled');bs[k].style.pointerEvents='auto';n++;}}"
     "return 'enabled:'+n;"
 )
 CLICK_JS = (
     "var bs=document.querySelectorAll('button,a');"
     "for(var k=0;k<bs.length;k++){var t=(bs[k].innerText||'').trim();"
-    "if(/renouvel/i.test(t)){bs[k].click();return 'clicked:'+t.slice(0,40);}}"
+    "var c=String(bs[k].className||'');"
+    "if(/renouvel/i.test(t)||/js-free-renew/.test(c)){bs[k].click();return 'clicked:'+t.slice(0,40);}}"
     "return 'not-found';"
 )
 SITEKEY_JS = (
     "var r=window.__fdapi||[];"
     "for(var i=0;i<r.length;i++){var b=String(r[i].body||'');"
-    "var m=b.match(/\"site_?key\"\s*:\s*\"([^\"]+)\"/i)||b.match(/(0x4[A-Za-z0-9_\-]{10,})/);"
+    r"var m=b.match(/\"site_?key\"\s*:\s*\"([^\"]+)\"/i)||b.match(/(0x4[A-Za-z0-9_\-]{10,})/);"
     "if(m){return m[1];}}return '';"
 )
 
@@ -247,6 +251,35 @@ def main() -> int:
         sb.wait_for_ready_state_complete()
         time.sleep(3)
         print(f"  [0] URL = {sb.get_current_url()}", flush=True)
+        # ── 2026-11-21：COOKIE 失效時，前端會把 /services/ 跳去 /404/index.html
+        #    （run 43728303291 實證：URL = https://fridaydev.fr/404/index.html，
+        #    頁面「Oups ! La page que vous cherchez n'existe pas」）。
+        #    之前探針冇檢查落地 URL，照樣跑落去，得出 [掣資訊] []、[sitekey] ''、
+        #    widget=false 一堆空值，最後把「登入態冇咗」誤報成「Turnstile 拿不到 token」。
+        #    呢個係憑證問題，唔係 Turnstile 問題 → 直接講清楚，退出碼 3（環境問題）。
+        _landed = (sb.get_current_url() or "")
+        # 2026-11-21：雙重判 —— URL 命中 /404、/login 之外，再核對頁面標題／正文，
+        # 避免「網址正常但內容係 Page Not Found」呢種情況漏判。
+        try:
+            _title = (sb.get_title() or "")
+        except Exception:
+            _title = ""
+        try:
+            _head = (sb.execute_script("return (document.body?document.body.innerText:'').slice(0,400)") or "")
+        except Exception:
+            _head = ""
+        _is404 = ("/404" in _landed or "/login" in _landed or "/connexion" in _landed
+                  or "page not found" in _title.lower() or "404" in _title.lower()
+                  or "oups" in _head.lower() or "n'existe pas" in _head.lower())
+        if _is404:
+            _msg = ("🧪 FridayDev 探針（只讀）\n"
+                    f"❌ COOKIE 已失效 —— 開 /services/ 被前端跳去 {_landed}\n"
+                    f"頁面標題：{_title}\n"
+                    "Turnstile 冇問題，係登入態冇咗。請重新登入 fridaydev.fr，"
+                    "把新的 cookie 寫入 secret COOKIE。")
+            print("\n" + _msg, flush=True)
+            tg(_msg)
+            return 3
         try:
             got = sb.execute_script(DISMISS_JS)
             print(f"  [cookie 橫幅] 撳咗: {got!r}", flush=True)
