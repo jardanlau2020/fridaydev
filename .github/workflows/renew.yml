@@ -77,7 +77,14 @@ jobs:
           echo "════ 出口清单 ════"
           cat /tmp/exit_report.txt
           if [ "$clean" != "1" ]; then
-            echo "❌ 没有找到干净出口"
+            # 没有干净出口时，sing-box 已经被杀掉了；但前面成功的节点已经把
+            # IS_PROXY=true 写进 $GITHUB_ENV，会让 app.py 拿着一个死代理跑
+            # （run 44900742055：ERR_PROXY_CONNECTION_FAILED）。这里改回 false，
+            # 让 app.py 至少走直连、能留下真实证据。
+            pkill -f sing-box 2>/dev/null || true
+            fuser -k 1080/tcp 2>/dev/null || true
+            echo "IS_PROXY=false" >> "$GITHUB_ENV"
+            echo "❌ 没有找到干净出口（已回退直连）"
             exit 1
           fi
 
