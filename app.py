@@ -129,8 +129,11 @@ def send_telegram_message(message: str, kind: str = "unknown", urgent: bool = Fa
 
 
 def send_telegram_photo(message: str, image_path: str, kind: str = "unknown", urgent: bool = False):
-    """截图仍走 artifact；告警层不再开 sendPhoto 通道，否则「一天一条」又会被破。"""
-    return alert(kind, detail=message, urgent=urgent)
+    """截图仍走 artifact；urgent 时额外带图（sendPhoto），非 urgent 只发文字合并。
+
+    只改通知出口，续期逻辑一行不动。
+    """
+    return alert(kind, detail=message, urgent=urgent, photo=image_path)
 
 
 def update_github_secret(secret_name, new_value):

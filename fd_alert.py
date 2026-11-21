@@ -159,10 +159,49 @@ def build(kind, detail="", extra=""):
         STEPS.get(kind, "1. 把这条告警和 run 链接发给 load藤，由他分派。"), extra)
 
 
-def alert(kind, detail="", extra="", urgent=False):
+def _api_photo(caption, photo_path):
+    """sendPhoto（multipart）。只给 urgent 用：穿透一天一条时带图才有意义。"""
+    if DRY or not TOKEN or not CHAT:
+        print("[alert][DRY] sendPhoto: %s" % caption[:300], flush=True)
+        return True, 1
+    import uuid
+    try:
+        boundary = "----fdalert" + uuid.uuid4().hex
+        with open(photo_path, "rb") as fh:
+            img = fh.read()
+        parts = []
+
+        def _field(name, value):
+            parts.append(("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n"
+                          % (boundary, name, value)).encode())
+
+        _field("chat_id", CHAT)
+        _field("caption", caption[:1024])
+        parts.append(("--%s\r\nContent-Disposition: form-data; name=\"photo\"; "
+                      "filename=\"result.png\"\r\nContent-Type: image/png\r\n\r\n"
+                      % boundary).encode())
+        parts.append(img)
+        parts.append(("\r\n--%s--\r\n" % boundary).encode())
+        req = urllib.request.Request(
+            "https://api.telegram.org/bot%s/sendPhoto" % TOKEN,
+            data=b"".join(parts),
+            headers={"Content-Type": "multipart/form-data; boundary=%s" % boundary})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            res = json.loads(r.read().decode() or "{}")
+        mid = (res.get("result") or {}).get("message_id")
+        print("[alert] sendPhoto ok mid=%s" % mid, flush=True)
+        return True, mid
+    except Exception as exc:
+        print("[alert] sendPhoto 失败: %s" % exc, flush=True)
+        return False, None
+
+
+def alert(kind, detail="", extra="", urgent=False, photo=None):
     """发告警：一天最多一条，同日重复合并进同一条。返回是否成功。
 
     urgent=True：无视「当天已发过」，立即新发一条（失败 / 需人工必须能穿透）。
+                 带 photo 时走 sendPhoto（穿透 + 带图才有意义）。
+    photo：截图路径，只在 urgent 时使用；非 urgent 一律纯文字，免得一天一条被破。
     """
     today = _now().strftime("%Y-%m-%d")
     st = _load()
@@ -172,11 +211,17 @@ def alert(kind, detail="", extra="", urgent=False):
 
     if urgent:
         text = ("🚨【需人工】" + build(kind, detail, extra))[:MAXLEN]
-        ok, mid = _api("sendMessage", {"chat_id": CHAT, "text": text,
-                                       "disable_web_page_preview": True})
-        if ok:
-            st["message_id"] = mid
-            st["text"] = text
+        ok, mid = False, None
+        if photo and os.path.isfile(photo):
+            ok, mid = _api_photo(text, photo)
+        if not ok:
+            ok, mid = _api("sendMessage", {"chat_id": CHAT, "text": text,
+                                           "disable_web_page_preview": True})
+        # 故意不写 st["message_id"]：urgent 那条是独立的【需人工】消息，
+        # 让它当「当天那条普通消息」的话，后面的成功/排队中会去 edit 它，
+        # 变成「需人工失败」下面挂着「同日重复：续期成功」，直接误导判断。
+        if ok and mid:
+            st.setdefault("urgent_ids", []).append(mid)
         _save(st)
         return ok
 
