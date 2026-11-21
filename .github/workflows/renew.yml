@@ -8,7 +8,7 @@ on:
 jobs:
   Renew-friday:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 45
     permissions:
       contents: write
 
@@ -27,36 +27,59 @@ jobs:
           curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/setup_proxy.sh" -o /tmp/setup_proxy.sh
           echo "126c9f2473f2e94bf1b8e1e1d09fa97eedeb1a80c3f110b90c4b59a58b8c9981  /tmp/setup_proxy.sh" | sha256sum -c -
 
-      - name: ⚙ 设置代理 (sing-box，自动换节点)
+      - name: ⚙ 设置代理（逐节点验出口纯净度）
         continue-on-error: true
         env:
           HOME_SUB_URL: ${{ secrets.HOME_SUB_URL }}
         run: |
-          # 单节点 NODE_LINK 是死节点（42.200.173.5:443 connection refused），
-          # 改成从住宅订阅里挑 TCP 可达的节点逐条试，最多 12 条（job 只有 20 分钟）。
+          # 按速度挑的第一个节点出口是 104.28.155.210（Cloudflare 自己的段），
+          # Turnstile 见机房 IP 直接不给票据 —— 点多少次复选框都没用。
+          # 所以改成连上之后先验出口身份：hosting/proxy 为 true 的直接跳过。
           # 必须在工作区之外跑：actions/checkout 会先 Deleting the contents of
           # <workspace> 再 git init，sing-box 二进制放工作区会被删掉。
           curl -fsSL "$HOME_SUB_URL" -A 'clash-verge/v2.0' -o /tmp/home_sub.yaml
           curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/pick_node.py" -o /tmp/pick_node.py
-          python3 /tmp/pick_node.py /tmp/home_sub.yaml 12 > /tmp/nodes.txt
+          python3 /tmp/pick_node.py /tmp/home_sub.yaml 40 > /tmp/nodes.txt
           total=$(wc -l < /tmp/nodes.txt)
           echo "候选节点数: $total"
-          if [ "$total" -eq 0 ]; then echo "没有可达节点，中止"; exit 1; fi
+          : > /tmp/exit_report.txt
           mkdir -p /tmp/fdproxy
           cd /tmp/fdproxy
           n=0
-          ok=0
+          clean=0
           while IFS= read -r uri; do
             n=$((n+1))
-            echo "──── 尝试节点 $n/$total ────"
-            if NODE_LINK="$uri" bash /tmp/setup_proxy.sh; then
-              ok=1
-              echo "✅ 节点 $n 连通"
+            echo "──── 测试节点 $n/$total ────"
+            if ! NODE_LINK="$uri" bash /tmp/setup_proxy.sh; then
+              echo "节点 $n 连不通"
+              echo "node$n | 连不通" >> /tmp/exit_report.txt
+              continue
+            fi
+            info=$(curl -s --max-time 20 -x socks5h://127.0.0.1:1080 \
+              'http://ip-api.com/json/?fields=status,query,country,isp,org,as,hosting,proxy,mobile' || echo '{}')
+            echo "出口信息: $info"
+            ip=$(echo "$info" | jq -r '.query // "?"')
+            isp=$(echo "$info" | jq -r '.isp // "?"')
+            hosting=$(echo "$info" | jq -r '.hosting // true')
+            proxied=$(echo "$info" | jq -r '.proxy // true')
+            echo "node$n | $ip | $isp | hosting=$hosting proxy=$proxied" >> /tmp/exit_report.txt
+            if [ "$hosting" = "false" ] && [ "$proxied" = "false" ]; then
+              echo "✅ 节点 $n 出口干净（hosting=false proxy=false）"
+              clean=1
               break
             fi
-            echo "节点 $n 不通，换下一个"
+            echo "节点 $n 出口不干净，换下一个"
+            pkill -f sing-box 2>/dev/null || true
+            fuser -k 1080/tcp 2>/dev/null || true
+            sleep 1
           done < /tmp/nodes.txt
-          if [ "$ok" != "1" ]; then echo "❌ 所有候选节点都不通"; exit 1; fi
+
+          echo "════ 出口清单 ════"
+          cat /tmp/exit_report.txt
+          if [ "$clean" != "1" ]; then
+            echo "❌ 没有找到干净出口"
+            exit 1
+          fi
 
       - name: Checkout repository
         uses: actions/checkout@v6
