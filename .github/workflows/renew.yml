@@ -135,8 +135,11 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python -u app.py
 
-      # 更新时间到 time.txt，避免 6 个月未更新导致工作流暂停
+      # 更新时间到 time.txt，避免 6 个月未更新导致工作流暂停。
+      # time.txt 只是防休眠的时间戳：push 撞上 main 被推进（non-fast-forward）
+      # 不值得让整个 job 报红 —— 续期本身已经成功，红只会让人误判。
       - name: 🕒 更新时间
+        continue-on-error: true
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
