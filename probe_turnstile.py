@@ -86,6 +86,26 @@ DISMISS_JS = (
 
 
 SRC_JS = "return String(window.fdCaptchaSolve).slice(0,400);"
+# 診斷用（只讀）：CF 唔落 iframe 嘅原因，分三種——sitekey 被拒 / api.js 被攔 / 靜默拒絕。
+# 單行 JS（UC 模式 CDP evaluate 唔吞多行）。
+DIAG_JS = (
+    "var q=function(s){return document.querySelector(s)};"
+    "var m=q('.fd-captcha-msg');"
+    "var w=q('.fd-captcha-widget')||q('[class*=captcha]');"
+    "var sc=Array.prototype.map.call(document.querySelectorAll('script[src]'),"
+    "function(s){return String(s.src)});"
+    "return JSON.stringify({"
+    "msg:m?String(m.textContent||'').trim().slice(0,300):'<no-el>',"
+    "msg_el:!!m,"
+    "widget_html:w?String(w.innerHTML||'').slice(0,300):'<no-el>',"
+    "all_iframes:document.querySelectorAll('iframe').length,"
+    "cf_iframes:document.querySelectorAll('iframe[src*=\"challenges.cloudflare.com\"]').length,"
+    "turnstile_api:typeof window.turnstile,"
+    "fdCaptchaSolve:typeof window.fdCaptchaSolve,"
+    "cf_scripts:sc.filter(function(u){return u.indexOf('turnstile')>=0"
+    "||u.indexOf('challenges.cloudflare.com')>=0}),"
+    "script_total:sc.length});"
+)
 LOADCF_JS = (
     "var s=document.createElement('script');"
     "s.src='https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';"
@@ -445,6 +465,14 @@ def main() -> int:
         except Exception:
             pass
         final = state(sb)
+
+        # 只讀診斷：讀 .fd-captcha-msg + widget 內容 + turnstile 腳本清單，
+        # 用來區分「sitekey 被拒」「api.js 被攔」「CF 靜默拒絕」。
+        try:
+            diag = sb.execute_script(DIAG_JS)
+        except Exception as exc:
+            diag = '{"err":"%s: %s"}' % (type(exc).__name__, str(exc).replace('"', "'")[:200])
+        print(f"  [diag] {diag}", flush=True)
 
     ok = bool(token)
     if ok:
