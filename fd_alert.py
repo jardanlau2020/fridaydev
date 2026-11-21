@@ -37,6 +37,9 @@ HEAD = {
     "structure": "🚨 FridayDev · 页面结构变了（今日唯一一条）",
     "renew_failed": "🚨 FridayDev · 续期没生效（今日唯一一条）",
     "window_open": "🔔 FridayDev · 续期窗口已开（今日唯一一条）",
+    "renew_ok": "✅ FridayDev · 续期成功（今日一条）",
+    "renew_pending": "⏳ FridayDev · 已提交，服务端排队中（今日一条）",
+    "unknown": "ℹ️ FridayDev · 结果未知（并入今日一条）",
     "probe_cookie": "🧪 FridayDev 探针 · COOKIE 已失效（今日唯一一条）",
     "probe_other": "🧪 FridayDev 探针 · 状态变化（今日唯一一条）",
 }
@@ -89,6 +92,24 @@ STEPS = {
         "3. 401/403/跳登录 → 按「COOKIE 已失效」4 步重贴 cookie。\n"
         "4. 探针只读，不需要立刻处理；把 run 链接发给 load藤即可。"
     ),
+    "renew_ok": (
+        "1. 打开 %s 看一眼服务卡，确认到期日已经往后推（截图留证）。\n"
+        "2. 记住新的到期日，续期窗口下一次开在到期前 5 天。\n"
+        "3. 不需要做别的动作，脚本明天照常巡检。\n"
+        "4. 若到期日没变，把这条消息和 run 链接发给 load藤。"
+    ) % SERVICES,
+    "renew_pending": (
+        "1. 过 20–30 分钟再打开 %s 刷一次，看到期日有没有往后推。\n"
+        "2. 推了 → 什么都不用做，今天的续期已经生效。\n"
+        "3. 没推 → 到 Actions 手动跑一次 renew.yml，看这次日志的「当前页面日期」。\n"
+        "4. 连跑两次都没推 → 把日志尾 20 行发给 load藤。"
+    ) % SERVICES,
+    "unknown": (
+        "1. 打开 %s ，确认能看到服务卡和到期日。\n"
+        "2. 能看到 → 说明只是本轮页面没加载出来，不用处理，等下一次巡检。\n"
+        "3. 看不到 / 被弹到 /404 → 按「登录态失效」处理，重贴 COOKIE。\n"
+        "4. 拿不准就把 run 链接发给 load藤。"
+    ) % SERVICES,
 }
 
 
@@ -138,13 +159,26 @@ def build(kind, detail="", extra=""):
         STEPS.get(kind, "1. 把这条告警和 run 链接发给 load藤，由他分派。"), extra)
 
 
-def alert(kind, detail="", extra=""):
-    """发告警：一天最多一条，同日重复合并进同一条。返回是否成功。"""
+def alert(kind, detail="", extra="", urgent=False):
+    """发告警：一天最多一条，同日重复合并进同一条。返回是否成功。
+
+    urgent=True：无视「当天已发过」，立即新发一条（失败 / 需人工必须能穿透）。
+    """
     today = _now().strftime("%Y-%m-%d")
     st = _load()
     if st.get("date") != today:
         st = {"date": today, "message_id": None, "kinds": {}, "text": ""}
     st["kinds"][kind] = st.get("kinds", {}).get(kind, 0) + 1
+
+    if urgent:
+        text = ("🚨【需人工】" + build(kind, detail, extra))[:MAXLEN]
+        ok, mid = _api("sendMessage", {"chat_id": CHAT, "text": text,
+                                       "disable_web_page_preview": True})
+        if ok:
+            st["message_id"] = mid
+            st["text"] = text
+        _save(st)
+        return ok
 
     if st.get("message_id"):
         note = "\n\n＋ 同日重复：%s（今日第 %d 次，最后 %s）" % (

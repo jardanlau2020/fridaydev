@@ -17,6 +17,16 @@ except ImportError:
     from playwright.sync_api import sync_playwright
     USING_PATCHRIGHT = False
 
+# 告警层：一天最多一条 + 正文带可执行步骤（见 fd_alert.py / FD_ALERT.md）。
+# 模块缺失时降级为只打印，绝不因为告警把续期拖死。
+try:
+    from fd_alert import alert
+except Exception as _alert_err:  # noqa: BLE001
+    def alert(kind, detail="", extra="", urgent=False):  # type: ignore[misc]
+        print(f"[alert][fallback] {kind}: {detail}", flush=True)
+        return False
+    print(f"⚠️ fd_alert 载入失败，告警降级为日志: {_alert_err}", flush=True)
+
 GH_TOKEN      = os.environ.get("GH_TOKEN") or ""
 TG_CHAT_ID    = os.environ.get("TG_CHAT_ID") or ""
 TG_BOT_TOKEN  = os.environ.get("TG_BOT_TOKEN") or ""
@@ -113,38 +123,14 @@ def mask_email(email: str) -> str:
     return (email[:2] + "****") if email else "（未填）"
 
 
-def send_telegram_message(message: str):
-    if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        print("⚠️ Telegram 未配置，跳过通知")
-        return
-    try:
-        requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
-                      json={"chat_id": TG_CHAT_ID, "text": message}, timeout=10)
-        print("✅ Telegram 文字通知已发送")
-    except Exception as e:
-        print(f"❌ Telegram 发送失败: {e}")
+def send_telegram_message(message: str, kind: str = "unknown", urgent: bool = False):
+    """告警统一出口（见 fd_alert）：一天最多一条，同日合并；urgent=True 时穿透立即新发。"""
+    return alert(kind, detail=message, urgent=urgent)
 
 
-def send_telegram_photo(message: str, image_path: str):
-    """TG 附截图通知，截图不存在或未配置则退化为纯文字。"""
-    if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        print("⚠️ Telegram 未配置，跳过通知")
-        return
-    try:
-        if image_path and os.path.isfile(image_path):
-            with open(image_path, "rb") as f:
-                r = requests.post(
-                    f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto",
-                    data={"chat_id": TG_CHAT_ID, "caption": message[:1000]},
-                    files={"photo": (os.path.basename(image_path), f, "image/png")},
-                    timeout=20)
-            if r.status_code == 200:
-                print("✅ Telegram 截图通知已发送")
-                return
-            print(f"⚠️ sendPhoto 失败({r.status_code})，降级为文字通知")
-    except Exception as e:
-        print(f"⚠️ 截图通知异常，降级为文字通知: {e}")
-    send_telegram_message(message)
+def send_telegram_photo(message: str, image_path: str, kind: str = "unknown", urgent: bool = False):
+    """截图仍走 artifact；告警层不再开 sendPhoto 通道，否则「一天一条」又会被破。"""
+    return alert(kind, detail=message, urgent=urgent)
 
 
 def update_github_secret(secret_name, new_value):
@@ -881,7 +867,7 @@ def renew(page, context, cookie_pairs, cookie_raw, email, current_ip="未知") -
     if not login(page, context, cookie_pairs):
         msg = format_notification("❌ 登录失败", email=email, current_ip=current_ip,
                                   error="Cookie 已失效，请从浏览器重拷 Secrets 更新")
-        send_telegram_message(msg)
+        send_telegram_message(msg, kind="session", urgent=True)
         result["summary"] = "❌ 登录失败（Cookie 失效）"
         return result
 
@@ -897,11 +883,8 @@ def renew(page, context, cookie_pairs, cookie_raw, email, current_ip="未知") -
     btn, btn_text = find_renew_button(page)
 
     if btn is None and not_yet:
-        log(f"⏳ 未到续期时间：{not_yet} 后可续")
-        send_telegram_message(format_notification(
-            "⏳ 未到续期时间", email=email, current_ip=current_ip,
-            extra=f"⏱️ {not_yet}后可续",
-            old_due=old_max.strftime("%d/%m/%Y") if old_max else "（未获取到）"))
+        # 降噪：未到续期时间不是告警。只 log，连 alert() 都不调（原来每天发一条 TG）。
+        log(f"⏳ 未到续期时间：{not_yet} 后可续（仅记录，不发 TG）")
         result.update(ok=True, summary=f"⏳ 未到时间（{not_yet}后）")
 
     elif btn is not None:
@@ -913,7 +896,8 @@ def renew(page, context, cookie_pairs, cookie_raw, email, current_ip="未知") -
             err = f"点击续期按钮失败: {e}"
             log(f"❌ {err}")
             send_telegram_message(format_notification("❌ 续期失败", email=email,
-                                                      current_ip=current_ip, error=err))
+                                                      current_ip=current_ip, error=err),
+                                  kind="renew_failed", urgent=True)
             result["summary"] = "❌ 续期失败（点击按钮出错）"
             return result
         page.wait_for_timeout(4000)
@@ -987,7 +971,8 @@ def renew(page, context, cookie_pairs, cookie_raw, email, current_ip="未知") -
             send_telegram_photo(format_notification(
                 "✅ 续期成功", email=email, current_ip=current_ip,
                 old_due=old_max.strftime("%d/%m/%Y") if old_max else "",
-                new_due=new_max.strftime("%d/%m/%Y") if new_max else "（状态活跃）"), shot)
+                new_due=new_max.strftime("%d/%m/%Y") if new_max else "（状态活跃）"), shot,
+                kind="renew_ok")
             result.update(ok=True,
                           summary=f"✅ 续期成功（到期 {new_max.strftime('%d/%m/%Y') if new_max else '活跃'}）")
         elif old_max is None:
@@ -996,6 +981,11 @@ def renew(page, context, cookie_pairs, cookie_raw, email, current_ip="未知") -
             # 不发光，归到告警层按天合并。这一档必须在「排队中」之前判，
             # 否则会掉进后面的失败分支，把「读不到」报成「❌ 续期失败」。
             log("ℹ️ 结果未知：续期前未读到到期日，无法判断是否续上")
+            # 并入当天那一条（非 urgent）；今天还没有消息时才会新建一条。
+            send_telegram_message(format_notification(
+                "ℹ️ 未知（未读到续期前日期）", email=email, current_ip=current_ip,
+                extra="续期前就没读到到期日，无法比较，请下次跑或手工看一眼后台"),
+                kind="unknown")
             result["summary"] = "ℹ️ 未知（未读到续期前日期）"
         elif find_not_yet_text(new_text) and not not_yet:
             # 日期还没变，但页面已经回到「Renouvelable dans N jour(s)」倒计时，
@@ -1007,7 +997,8 @@ def renew(page, context, cookie_pairs, cookie_raw, email, current_ip="未知") -
             send_telegram_photo(format_notification(
                 "✅ 已提交，服务端排队中", email=email, current_ip=current_ip,
                 extra=f"页面已回到「{nxt}后可续」，到期日暂未更新",
-                old_due=old_max.strftime("%d/%m/%Y") if old_max else ""), shot)
+                old_due=old_max.strftime("%d/%m/%Y") if old_max else ""), shot,
+                kind="renew_pending")
             result.update(ok=True, summary=f"✅ 已提交，服务端排队中（{nxt}后可续）")
         else:
             # 走到这里一定满足 old_max 有值（未知档已在前面拦掉），
@@ -1016,20 +1007,23 @@ def renew(page, context, cookie_pairs, cookie_raw, email, current_ip="未知") -
             send_telegram_photo(format_notification(
                 "❌ 续期失败", email=email, current_ip=current_ip,
                 error="点击并确认后复核到 deadline，到期日未变、页面仍是续期按钮",
-                old_due=old_max.strftime("%d/%m/%Y") if old_max else "（未获取到）"), shot)
+                old_due=old_max.strftime("%d/%m/%Y") if old_max else "（未获取到）"), shot,
+                kind="renew_failed", urgent=True)
             result["summary"] = "❌ 续期失败（日期未变）"
     else:
         log("ℹ️ 未找到续期按钮/倒计时，状态未知")
         send_telegram_message(format_notification(
             "ℹ️ 状态未知", email=email, current_ip=current_ip, extra="未找到续期按钮，请手动检查",
-            old_due=old_max.strftime("%d/%m/%Y") if old_max else "（未获取到）"))
+            old_due=old_max.strftime("%d/%m/%Y") if old_max else "（未获取到）"),
+            kind="structure")
         result["summary"] = "ℹ️ 状态未知"
 
     warn = cookie_expiry_warning(context)
     if warn:
         log(warn)
         send_telegram_message(format_notification("🔔 Cookie 有效期预警", email=email,
-                                                  current_ip=current_ip, extra=warn))
+                                                  current_ip=current_ip, extra=warn),
+                              kind="session")
     new_raw = rebuild_cookie_str(context, cookie_raw)
     if new_raw:
         vlog("🔄 浏览器 Cookie 有更新，回写 Secrets...")
@@ -1072,7 +1066,8 @@ def main():
             result = {"ok": False, "summary": f"❌ 执行异常：{e}"}
             try:
                 send_telegram_message(format_notification(
-                    "❌ 续期失败", email=acct["email"], current_ip=current_ip, error=f"执行异常：{e}"))
+                    "❌ 续期失败", email=acct["email"], current_ip=current_ip, error=f"执行异常：{e}"),
+                    kind="renew_failed", urgent=True)
             except Exception:
                 pass
         finally:

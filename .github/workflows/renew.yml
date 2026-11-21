@@ -32,7 +32,11 @@ jobs:
         env:
           HOME_SUB_URL: ${{ secrets.HOME_SUB_URL }}
         run: |
-          # 按速度挑的第一个节点出口是 104.28.155.210（Cloudflare 自己的段），
+          # HOME_SUB_URL 已按老板决定删除：没配就直接跳过，走直连（不报错、不刷日志）。
+          if [ -z "${HOME_SUB_URL:-}" ]; then
+            echo "无 HOME_SUB_URL，跳过代理，走直连"
+            exit 0
+          fi
           # Turnstile 见机房 IP 直接不给票据 —— 点多少次复选框都没用。
           # 所以改成连上之后先验出口身份：hosting/proxy 为 true 的直接跳过。
           # 必须在工作区之外跑：actions/checkout 会先 Deleting the contents of
@@ -125,6 +129,15 @@ jobs:
           fi
           /tmp/fdproxy/sing-box version | grep -q "1.14.4" || { echo "sing-box 版本不符，中止"; exit 1; }
 
+      # 告警状态：一天最多一条靠它。GHA 每次都是新容器，不留 state 就天天重发。
+      - name: ♻️ 恢复告警状态（一天一条）
+        uses: actions/cache/restore@v4
+        with:
+          path: fd_alert_state.json
+          key: fdalert-${{ github.run_id }}
+          restore-keys: |
+            fdalert-
+
       - name: 🚀 运行续期脚本
         env:
           COOKIE: ${{ secrets.COOKIE }}
@@ -134,6 +147,14 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python -u app.py
+
+      - name: 💾 保存告警状态
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: fd_alert_state.json
+          key: fdalert-${{ github.run_id }}
 
       # 更新时间到 time.txt，避免 6 个月未更新导致工作流暂停。
       # time.txt 只是防休眠的时间戳：push 撞上 main 被推进（non-fast-forward）
