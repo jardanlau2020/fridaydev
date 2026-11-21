@@ -7,42 +7,30 @@ set -e
 export NODE_LINK=${NODE_LINK:-''}
 
 if [ -z "$NODE_LINK" ]; then
-  echo "[INFO] 未配置代理，直连模式"
+  echo "[INFO] 🎯 未配置代理，直连模式"
   echo "IS_PROXY=false" >> $GITHUB_ENV
   exit 0
 fi
 
 if ! command -v jq &> /dev/null; then
-  echo "[ERROR] jq 未安装，正在安装..."
+  echo "[ERROR] ⚠️ jq 未安装，正在安装..."
   sudo apt-get update && sudo apt-get install -y jq
 fi
 
-# 晴天 patch：原寫法 `A && B || C && D` 優先級錯誤（curl 存在時都會選 wget）且 curl 缺 -L 跟 redirect
-if command -v curl >/dev/null 2>&1; then
-  COMMAND="curl -sLo"
-elif command -v wget >/dev/null 2>&1; then
-  COMMAND="wget -qO"
-else
-  echo "Error: neither curl nor wget found." >&2; exit 1
-fi
+command -v curl &>/dev/null && COMMAND="curl -so" || command -v wget &>/dev/null && COMMAND="wget -qO" || { red "Error: neither curl nor wget found, please install one of them." >&2; exit 1; }
 
-# 晴天 patch：CWD 已有可用 sing-box 就跳過下載（GHA runner 首跑必無，照舊下載）
-if [ -x ./sing-box ] && ./sing-box version >/dev/null 2>&1; then
-  echo "[INFO] 檢測到本地 sing-box，跳過下載"
-else
+echo "[INFO] 🔍 使用锁定的 sing-box 版本（不再取 latest）..."
+# 2026-11-21 锁版本：原来这里 curl releases/latest 现取，上游一发版就换二进制、
+# 且 tarball 无校验和。改成写死 1.14.4（官方 v1.14.4，2026-10-24 发布，
+# tarball sha256 699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968）。
+latest_version="1.14.4"
 
-echo "[INFO] 获取 sing-box 最新版本..."
-# 晴天 patch 2026-10-08：GHA runner 打未認證 GitHub API 常撞 rate limit（60/h/IP），
-# 回嘅係 {"message":"API rate limit exceeded..."} 而唔係陣列 → jq 報
-# "Cannot index string with string \"prerelease\"" 並因 set -e 直接殺死腳本，
-# 連下面嘅 fallback 都去唔到（實證 run 37807287836，白白報「代理起唔到」）。
-# 加 `2>/dev/null || true` 令查唔到就落 fallback 版本。
-latest_version=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases" 2>/dev/null | jq -r '[.[] | select(.prerelease==false)][0].tag_name | sub("^v"; "")' 2>/dev/null || true)
-if [ -z "$latest_version" ] || [ "$latest_version" = "null" ]; then
-  echo "[ERROR] 无法获取 sing-box 最新版本,将下载v1.13.16"
-  export latest_version=1.13.16
+# 校验获取到的版本号是否合法
+if [ -z "$latest_version" ] || ! echo "$latest_version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+'; then
+  echo "[WARN] ⚠️ 获取最新版本失败或格式异常，自动降级使用备用版本: 1.13.16"
+  export latest_version="1.13.16"
 fi
-echo "[INFO] 最新稳定版本: v${latest_version}"
+echo "[INFO] ⚙️ 当前使用版本: v${latest_version}"
 
 ARCH_RAW=$(uname -m)
 case "${ARCH_RAW}" in
@@ -51,15 +39,15 @@ case "${ARCH_RAW}" in
     'aarch64' | 'arm64') ARCH='arm64' ;;
     'armv7l')  ARCH='armv7' ;;
     's390x')   ARCH='s390x' ;;
-    *) echo "不支持的架构: ${ARCH_RAW}"; exit 1 ;;
+    *) echo "❌ 不支持的架构: ${ARCH_RAW}"; exit 1 ;;
 esac
 
 download_version="$latest_version"
 if ! $COMMAND "sing-box-${download_version}-linux-${ARCH}.tar.gz" "https://github.com/SagerNet/sing-box/releases/download/v${download_version}/sing-box-${download_version}-linux-${ARCH}.tar.gz"; then
-    echo "[WARN] 下载版本 v${download_version} 失败，尝试备用版本 v1.13.16"
+    echo "[WARN] ⚠️ 下载版本 v${download_version} 失败，尝试备用版本 v1.13.16"
     download_version="1.13.16"
     if ! $COMMAND "sing-box-${download_version}-linux-${ARCH}.tar.gz" "https://github.com/SagerNet/sing-box/releases/download/v${download_version}/sing-box-${download_version}-linux-${ARCH}.tar.gz"; then
-        echo "[ERROR] 备用版本也下载失败，请检查网络连接"
+        echo "[ERROR] ❌ 不备用版本也下载失败，请检查网络连接"
         exit 1
     fi
 fi
@@ -71,13 +59,11 @@ rm -f "sing-box-${download_version}-linux-${ARCH}.tar.gz"
 rm -rf "sing-box-${download_version}-linux-${ARCH}"
 chmod +x sing-box
 
-fi  # 晴天 patch：本地已有 sing-box 跳過下載
-
 proto=$(echo "$NODE_LINK" | cut -d':' -f1)
 content="${NODE_LINK#*://}"
 content="${content%%#*}"
 
-echo "[INFO] 协议: $proto"
+echo "[INFO] 🚩 协议: $proto"
 # echo "[INFO] 原始内容: $content"
 
 # 初始化变量
@@ -152,21 +138,10 @@ case "$proto" in
       [ -n "$pbk" ] && outbound_reality_pbk="$pbk"
       sid=$(echo "$query" | grep -o 'sid=[^&]*' | cut -d= -f2)
       [ -n "$sid" ] && outbound_reality_sid="$sid"
-      # 晴天 patch 2026-10-08：alpn 原本只喺 tuic 分支解析，vless 完全冇 →
-      # 要求鎖 http/1.1 嘅節點（ws 走 CF）TLS 通唔到。實證：run 37806041608（SG 328）。
-      alpn_raw=$(echo "$query" | grep -o 'alpn=[^&]*' | cut -d= -f2)
-      if [ -n "$alpn_raw" ]; then
-        outbound_alpn=$(url_decode "$alpn_raw")
-      fi
       ins=$(echo "$query" | grep -o 'insecure=[^&]*' | cut -d= -f2)
       [ "$ins" = "1" ] || [ "$ins" = "true" ] && outbound_insecure="true"
       alins=$(echo "$query" | grep -o 'allowInsecure=[^&]*' | cut -d= -f2)
       [ "$alins" = "1" ] || [ "$alins" = "true" ] && outbound_insecure="true"
-      # 晴天 patch 2026-10-08：trojan 都要解析 alpn（同 vless 一樣嘅理由）
-      alpn_raw=$(echo "$query" | grep -o 'alpn=[^&]*' | cut -d= -f2)
-      if [ -n "$alpn_raw" ]; then
-        outbound_alpn=$(url_decode "$alpn_raw")
-      fi
     fi
     [ -z "$outbound_host" ] && outbound_host="$outbound_server"
     [ -z "$outbound_sni" ] && outbound_sni="$outbound_server"
@@ -349,34 +324,6 @@ case "$proto" in
     [ -z "$outbound_sni" ] && outbound_sni="$outbound_server"
     ;;
 
-  ss)
-    # SIP002: ss://base64(method:password)@host:port#tag（晴天 patch：支援 shadowsocks 家寬節點）
-    userinfo_host="${content%%@*}"
-    rest="${content#*@}"
-    if [[ "$rest" == *"?"* ]]; then
-      host_port="${rest%%\?*}"
-      query="${rest#*\?}"
-    else
-      host_port="$rest"
-      query=""
-    fi
-    host_port="${host_port%%#*}"
-    decoded=$(echo "$userinfo_host" | base64 -d 2>/dev/null || true)
-    if [[ "$decoded" == *":"* ]]; then
-      outbound_username="${decoded%%:*}"
-      outbound_password2="${decoded#*:}"
-    else
-      # 舊格式：整條 link base64
-      full_decoded=$(echo "$content" | base64 -d 2>/dev/null || true)
-      meth_pass="${full_decoded%%@*}"
-      outbound_username="${meth_pass%%:*}"
-      outbound_password2="${meth_pass#*:}"
-    fi
-    outbound_server="${host_port%:*}"
-    outbound_port="${host_port#*:}"
-    outbound_type="shadowsocks"
-    ;;
-
   socks5|socks)
     if [[ "$content" == *"@"* ]]; then
       user_pass="${content%%@*}"
@@ -404,13 +351,13 @@ case "$proto" in
 
 
   *)
-    echo "[ERROR] 不支持的协议: $proto"
+    echo "[ERROR] ⚠️ 不支持的协议: $proto"
     exit 1
     ;;
 esac
 
 if [ -z "$outbound_server" ] || [ -z "$outbound_port" ]; then
-  echo "[ERROR] 无法解析服务器地址或端口"
+  echo "[ERROR] ⚠️ 无法解析服务器地址或端口"
   exit 1
 fi
 
@@ -427,9 +374,6 @@ case "$outbound_type" in
     tls_enabled="false"
     [ "$outbound_security" = "tls" ] || [ "$outbound_security" = "reality" ] && tls_enabled="true"
     tls_json="{\"enabled\":$tls_enabled,\"server_name\":\"$outbound_sni\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$outbound_fingerprint\"}"
-    if [ -n "$outbound_alpn" ]; then
-      tls_json="$tls_json,\"alpn\":[\"$outbound_alpn\"]"
-    fi
     [ "$outbound_security" = "reality" ] && tls_json="$tls_json,\"reality\":{\"enabled\":true,\"public_key\":\"$outbound_reality_pbk\",\"short_id\":\"$outbound_reality_sid\"}"
     tls_json="$tls_json}"
     jq_outbound="$jq_outbound,\"tls\":$tls_json"
@@ -443,18 +387,8 @@ case "$outbound_type" in
     ;;
   trojan)
     jq_outbound="$jq_outbound,\"password\":\"$outbound_password\""
-    # 晴天 patch 2026-10-08：原本無條件加 transport，但 URI 寫 type=tcp 時會生成
-    # "transport":{"type":"tcp"}，sing-box 直接 FATAL（unknown transport type: tcp）
-    # —— 同 vless 分支一樣要判 tcp。實證：run 37806402371（trojan SG 556）。
-    if [ "$outbound_transport_type" != "tcp" ]; then
-      jq_outbound="$jq_outbound,\"transport\":{\"type\":\"$outbound_transport_type\",\"path\":\"$outbound_path\",\"headers\":{\"Host\":\"$outbound_host\"}}"
-    fi
-    trojan_tls="{\"enabled\":true,\"server_name\":\"$outbound_sni\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$outbound_fingerprint\"}"
-    if [ -n "$outbound_alpn" ]; then
-      trojan_tls="$trojan_tls,\"alpn\":[\"$outbound_alpn\"]"
-    fi
-    trojan_tls="$trojan_tls}"
-    jq_outbound="$jq_outbound,\"tls\":$trojan_tls"
+    jq_outbound="$jq_outbound,\"transport\":{\"type\":\"$outbound_transport_type\",\"path\":\"$outbound_path\",\"headers\":{\"Host\":\"$outbound_host\"}}"
+    jq_outbound="$jq_outbound,\"tls\":{\"enabled\":true,\"server_name\":\"$outbound_sni\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$outbound_fingerprint\"}}"
     ;;
   hysteria2)
     jq_outbound="$jq_outbound,\"up_mbps\":$outbound_up_mbps,\"down_mbps\":$outbound_down_mbps"
@@ -477,10 +411,6 @@ case "$outbound_type" in
     jq_outbound="$jq_outbound,\"password\":\"$outbound_password\""
     jq_outbound="$jq_outbound,\"tls\":{\"enabled\":true,\"server_name\":\"$outbound_sni\",\"insecure\":$outbound_insecure,\"utls\":{\"enabled\":true,\"fingerprint\":\"$outbound_fingerprint\"}}"
     ;;
-  shadowsocks)
-    jq_outbound="$jq_outbound,\"method\":\"$outbound_username\",\"password\":\"$outbound_password2\""
-    ;;
-
   socks)
     [ -n "$outbound_username" ] && jq_outbound="$jq_outbound,\"username\":\"$outbound_username\""
     [ -n "$outbound_password2" ] && jq_outbound="$jq_outbound,\"password\":\"$outbound_password2\""
@@ -505,15 +435,15 @@ EOF
 # cat sing-box-config.json
 
 if ! jq empty sing-box-config.json 2>/dev/null; then
-  echo "[ERROR] 生成的 sing-box 配置无效"
+  echo "[ERROR] ⚠️ 生成的 sing-box 配置无效"
   # cat sing-box-config.json
   exit 1
 fi
 
-echo "[INFO] ✅ sing-box 配置已生成"
+echo "[INFO] 🟢 sing-box 配置已生成"
 
 # 清理旧进程
-echo "[INFO] 清理旧进程..."
+echo "[INFO] 🧹 清理旧进程..."
 pkill -f sing-box 2>/dev/null || true
 fuser -k 1080/tcp 2>/dev/null || true
 sleep 2
@@ -522,20 +452,20 @@ sleep 2
 sleep 5
 
 if ! pgrep -f sing-box > /dev/null; then
-  echo "[ERROR] sing-box 进程启动失败，查看日志:"
+  echo "[ERROR] ❌️ sing-box 进程启动失败，查看日志:"
   cat sing-box.log
   exit 1
 fi
 
-echo "[INFO] 测试代理连接..."
+echo "[INFO] 🔧 测试代理连接..."
 for i in {1..3}; do
   if curl -x socks5://127.0.0.1:1080 -s --max-time 15 https://api.ipify.org > /dev/null 2>&1; then
     echo "[INFO] ✅ 代理连接成功"
     echo "IS_PROXY=true" >> $GITHUB_ENV
     echo "PROXY_SERVER=socks5://127.0.0.1:1080" >> $GITHUB_ENV
-    exit 0
+    exit 0 
   fi
-  echo "[WARN] 尝试 $i/3..."
+  echo "[WARN] 🟡 尝试 $i/3..."
   sleep 3
 done
 
