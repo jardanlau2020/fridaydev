@@ -23,7 +23,11 @@
 
 1. 新建仓库（建议名 `Friday-Renew`），把 `app.py`、`.github/workflows/renew.yml`、`README.md` 推上去，在 Actions 菜单允许工作流。
 2. 在 `Settings` ➡ `Secrets and variables` ➡ `Actions` 里添加上方 Secrets。
-3. 去 Actions 手动试运行一次；cron 为每天 UTC 7 点（北京时间 15 点），可按需调整。
+3. 去 Actions 手动试运行一次；cron 为每天 UTC 01:17（北京时间 09:17），避开整点高峰，可按需调整。
+
+> * 续期窗口只有 5 天量级（面板 `Renouveler gratuitement (5 jours)`），**一周跑一次必然漏**，所以是每天一次。改 cron 时别退回按星期几。
+> * GitHub 的 `schedule` 是 best-effort，免费 runner 上会排队，实际触发常比 cron 晚几十分钟到几小时；每天一次有足够补偿空间。
+> * 出口必须过 `ip-api` 的 `hosting=false && proxy=false` 校验才算干净，按 TCP 延迟挑出来的多半是 Cloudflare WARP，过不了 Turnstile。
 
 ### COOKIE 获取
 
