@@ -27,79 +27,132 @@ jobs:
           curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/setup_proxy.sh" -o /tmp/setup_proxy.sh
           echo "126c9f2473f2e94bf1b8e1e1d09fa97eedeb1a80c3f110b90c4b59a58b8c9981  /tmp/setup_proxy.sh" | sha256sum -c -
 
-      - name: ⚙ 设置代理（逐节点验出口纯净度）
-        continue-on-error: true
+      # 2026-11-23 换掉 sing-box：原路径靠 pick_node.py 只挑 vless/trojan，
+      # 而这 135 条订阅里 vless/trojan（63 条）的出口全是 Cloudflare WARP
+      # （hosting=true proxy=true，Turnstile 不给票）；真住宅在 68 条 openvpn 里，
+      # sing-box 不认 openvpn，所以原路永远 clean=0。改用 mihomo（认 openvpn），
+      # 实现照 openworld 的 renew-openworld.yml。
+      #
+      # 失败策略对齐 openworld：配了订阅却拉不起干净出口 → 直接判本轮失败，
+      # 不回落直连硬撞验证码（不写 IS_PROXY=false）。没配订阅才跳过走直连。
+      - name: 🏠 启动家宽出口（mihomo）
         env:
           HOME_SUB_URL: ${{ secrets.HOME_SUB_URL }}
         run: |
-          # HOME_SUB_URL 已按老板决定删除：没配就直接跳过，走直连（不报错、不刷日志）。
+          set -euo pipefail
           if [ -z "${HOME_SUB_URL:-}" ]; then
-            echo "无 HOME_SUB_URL，跳过代理，走直连"
+            echo "⚪ 未配置 HOME_SUB_URL，跳过家宽出口（走直连）"
             exit 0
           fi
-          # Turnstile 见机房 IP 直接不给票据 —— 点多少次复选框都没用。
-          # 所以改成连上之后先验出口身份：hosting/proxy 为 true 的直接跳过。
-          # 必须在工作区之外跑：actions/checkout 会先 Deleting the contents of
-          # <workspace> 再 git init，sing-box 二进制放工作区会被删掉。
-          curl -fsSL "$HOME_SUB_URL" -A 'clash-verge/v2.0' -o /tmp/home_sub.yaml
-          curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/pick_node.py" -o /tmp/pick_node.py
-          python3 /tmp/pick_node.py /tmp/home_sub.yaml 40 > /tmp/nodes.txt
-          total=$(wc -l < /tmp/nodes.txt)
-          echo "候选节点数: $total"
-          : > /tmp/exit_report.txt
-          mkdir -p /tmp/fdproxy
-          cd /tmp/fdproxy
-          n=0
-          clean=0
-          while IFS= read -r uri; do
-            n=$((n+1))
-            echo "──── 测试节点 $n/$total ────"
-            if ! NODE_LINK="$uri" bash /tmp/setup_proxy.sh; then
-              echo "节点 $n 连不通"
-              echo "node$n | 连不通" >> /tmp/exit_report.txt
-              continue
-            fi
-            info=$(curl -s --max-time 20 -x socks5h://127.0.0.1:1080 \
-              'http://ip-api.com/json/?fields=status,query,country,isp,org,as,hosting,proxy,mobile' || echo '{}')
-            echo "出口信息: $info"
-            ip=$(echo "$info" | jq -r '.query // "?"')
-            isp=$(echo "$info" | jq -r '.isp // "?"')
-            hosting=$(echo "$info" | jq -r '.hosting // true')
-            proxied=$(echo "$info" | jq -r '.proxy // true')
-            echo "node$n | $ip | $isp | hosting=$hosting proxy=$proxied" >> /tmp/exit_report.txt
-            if [ "$hosting" = "false" ] && [ "$proxied" = "false" ]; then
-              echo "✅ 节点 $n 出口干净（hosting=false proxy=false）"
-              clean=1
-              break
-            fi
-            echo "节点 $n 出口不干净，换下一个"
-            pkill -f sing-box 2>/dev/null || true
-            fuser -k 1080/tcp 2>/dev/null || true
-            sleep 1
-          done < /tmp/nodes.txt
 
-          echo "════ 出口清单 ════"
-          cat /tmp/exit_report.txt
-          if [ "$clean" != "1" ]; then
-            # 没有干净出口时，sing-box 已经被杀掉了；但前面成功的节点已经把
-            # IS_PROXY=true 写进 $GITHUB_ENV，会让 app.py 拿着一个死代理跑
-            # （run 44900742055：ERR_PROXY_CONNECTION_FAILED）。这里改回 false，
-            # 让 app.py 至少走直连、能留下真实证据。
-            pkill -f sing-box 2>/dev/null || true
-            fuser -k 1080/tcp 2>/dev/null || true
-            echo "IS_PROXY=false" >> "$GITHUB_ENV"
-            echo "❌ 没有找到干净出口（已回退直连）"
+          MIHOMO_VERSION=1.19.34
+          WORK=/tmp/fdproxy
+          mkdir -p "$WORK"
+          cd "$WORK"
+
+          echo "⬇️ 下载 mihomo ${MIHOMO_VERSION}"
+          curl -fsSL --retry 3 -o mihomo.gz \
+            "https://github.com/MetaCubeX/mihomo/releases/download/v${MIHOMO_VERSION}/mihomo-linux-amd64-v${MIHOMO_VERSION}.gz"
+          # 校验值取自 GitHub release asset 官方 digest（v1.19.34, 22731319 bytes）
+          echo "223fab877e5795ce780ba39902e5f0b1113c1256ae244a7160f1165e017e9ccc  mihomo.gz" | sha256sum -c -
+          gunzip -f mihomo.gz
+          mv mihomo mihomo-bin
+          chmod +x mihomo-bin
+
+          mkdir -p mihomo-home
+          if ! curl -fsSL --retry 2 --max-time 60 -o mihomo-home/config.yaml "$HOME_SUB_URL"; then
+            echo "❌ 订阅下载失败"
             exit 1
           fi
+
+          # 订阅的 rules 是 MATCH,🚀 节点选择，但这个组在订阅里不存在
+          # （只有 ⚡ CF前置 / 🏠 家宽自动 / 🏠 家宽节点）—— 不改的话默认流量
+          # 落到直连/第一个组，等于没走家宽。直接改指 🏠 家宽自动（fallback 自选）。
+          CP_BEFORE=$(md5sum mihomo-home/config.yaml | cut -d' ' -f1)
+          sed -i 's|^\(  - MATCH,\).*$|\1🏠 家宽自动|' mihomo-home/config.yaml
+          CP_AFTER=$(md5sum mihomo-home/config.yaml | cut -d' ' -f1)
+          if [ "$CP_BEFORE" = "$CP_AFTER" ]; then
+            echo "⚠️ rules 里没找到 MATCH 行，配置未改动"
+          else
+            echo "✅ rules 已改：MATCH -> 🏠 家宽自动"
+          fi
+          grep -n 'MATCH' mihomo-home/config.yaml || true
+
+          echo "--- proxies 统计 ---"
+          echo "openvpn 节点: $(grep -c 'type: openvpn' mihomo-home/config.yaml || true)"
+          echo "节点条目: $(grep -cE '^[[:space:]]*- name:' mihomo-home/config.yaml || true)"
+
+          nohup ./mihomo-bin -d ./mihomo-home -f ./mihomo-home/config.yaml > mihomo.log 2>&1 &
+          sleep 8
+          if ! ss -tuln | grep -q ':7890'; then
+            echo "❌ mihomo 没起来，日志如下"
+            cat mihomo.log || true
+            exit 1
+          fi
+
+          DIRECT_IP="$(curl -s --max-time 8 https://api.ipify.org || echo '')"
+          PROXY_IP="$(curl -s --max-time 25 -x http://127.0.0.1:7890 https://api.ipify.org || echo '')"
+          echo "📡 直连出口 IP: ${DIRECT_IP:-未知}"
+          echo "📡 家宽出口 IP: ${PROXY_IP:-未知}"
+          if [ -z "$PROXY_IP" ]; then
+            echo "❌ 家宽出口不通，直接失败退出（不白跑）"
+            exit 1
+          fi
+          if [ "$PROXY_IP" = "$DIRECT_IP" ]; then
+            echo "❌ 出口 IP 与直连相同，代理没生效，失败退出"
+            exit 1
+          fi
+
+          info=$(curl -s --max-time 20 -x http://127.0.0.1:7890 \
+            'http://ip-api.com/json/?fields=status,query,country,isp,org,as,hosting,proxy' || echo '{}')
+          echo "出口详情: $info"
+          # jq 优先，没装就退回 grep —— GHA 的 ubuntu runner 自带 jq，这里只是兜底。
+          if command -v jq >/dev/null 2>&1; then
+            get_hosting() { echo "$1" | jq -r '.hosting | tostring'; }
+          else
+            get_hosting() { echo "$1" | grep -o '"hosting":[^,}]*' | cut -d: -f2 | tr -d ' '; }
+          fi
+          hosting=$(get_hosting "$info")
+          if [ "$hosting" != "false" ]; then
+            echo "⚠️ 出口不是住宅（hosting=$hosting），尝试把 🏠 家宽节点 切到具体节点"
+            SEL=$(python3 -c "import urllib.parse;print(urllib.parse.quote('🏠 家宽节点'))")
+            for NODE in "🏠 JP-家宽-01" "🏠 JP-家宽-02" "🏠 KR-家宽-01" "🏠 JP-家宽-03"; do
+              NODE_JSON=$(python3 -c "import json,sys;print(json.dumps({'name':sys.argv[1]},ensure_ascii=False))" "$NODE")
+              curl -s -X PUT "http://127.0.0.1:9090/proxies/$SEL" \
+                -H "Content-Type: application/json" --data-binary "$NODE_JSON" || true
+              sleep 4
+              info=$(curl -s --max-time 20 -x http://127.0.0.1:7890 \
+                'http://ip-api.com/json/?fields=status,query,country,isp,org,as,hosting,proxy' || echo '{}')
+              echo "切到 $NODE 后: $info"
+              hosting=$(get_hosting "$info")
+              [ "$hosting" = "false" ] && break
+            done
+          fi
+          if [ "$hosting" != "false" ]; then
+            echo "❌ 仍拿不到住宅出口（hosting=$hosting），本轮失败退出"
+            exit 1
+          fi
+
+          echo "✅ 家宽出口就绪：$PROXY_IP"
+          # 只让业务请求走代理；GitHub / Telegram 走直连，避免 GITHUB_TOKEN 等
+          # Bearer 走第三方住宅出口（同 openworld 的 NO_PROXY 白名单）。
+          NO_PROXY_LIST="localhost,127.0.0.1,::1,github.com,githubusercontent.com,api.telegram.org"
+          echo "IS_PROXY=true"                      >> "$GITHUB_ENV"
+          echo "PROXY_SERVER=http://127.0.0.1:7890" >> "$GITHUB_ENV"
+          echo "HTTP_PROXY=http://127.0.0.1:7890"   >> "$GITHUB_ENV"
+          echo "HTTPS_PROXY=http://127.0.0.1:7890"  >> "$GITHUB_ENV"
+          echo "ALL_PROXY=http://127.0.0.1:7890"    >> "$GITHUB_ENV"
+          echo "NO_PROXY=$NO_PROXY_LIST"            >> "$GITHUB_ENV"
+          echo "no_proxy=$NO_PROXY_LIST"            >> "$GITHUB_ENV"
 
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           persist-credentials: true
-          # 代理步骤在 Checkout 之前，sing-box 二进制 / 配置是未跟踪文件；
-          # 默认 clean: true 会跑 git clean -ffdx 把它们清掉，后面版本核对
-          # 就会 ./sing-box: No such file。runner 每次全新，关掉安全。
+          # 代理步骤在 Checkout 之前，mihomo 二进制 / 配置在 /tmp/fdproxy（工作区外）；
+          # 默认 clean: true 会跑 git clean -ffdx，工作区里的未跟踪文件会被清掉，
+          # 这里继续关掉，避免误伤。
           clean: false
 
       - name: ⚙ 设置 Python
@@ -119,15 +172,17 @@ jobs:
           pip install patchright requests 'requests[socks]'
           python -m patchright install --with-deps chrome
 
-      - name: 🔎 核对 sing-box 版本
+      - name: 🔎 核对 mihomo 版本
         run: |
-          if [ ! -x /tmp/fdproxy/sing-box ]; then
+          if [ ! -x /tmp/fdproxy/mihomo-bin ]; then
             if [ "${IS_PROXY:-false}" = "true" ]; then
-              echo "IS_PROXY=true 但 /tmp/fdproxy/sing-box 不存在"; exit 1
+              echo "IS_PROXY=true 但 /tmp/fdproxy/mihomo-bin 不存在"
+              exit 1
             fi
-            echo "[WARN] 没有 sing-box（直连模式），跳过版本核对"; exit 0
+            echo "[WARN] 没有 mihomo（直连模式），跳过版本核对"
+            exit 0
           fi
-          /tmp/fdproxy/sing-box version | grep -q "1.14.4" || { echo "sing-box 版本不符，中止"; exit 1; }
+          /tmp/fdproxy/mihomo-bin -v | grep -q "1.19.34" || { echo "mihomo 版本不符，中止"; exit 1; }
 
       # 告警状态：一天最多一条靠它。GHA 每次都是新容器，不留 state 就天天重发。
       - name: ♻️ 恢复告警状态（一天一条）
@@ -193,6 +248,7 @@ jobs:
       - name: 🧽 清理进程和临时文件
         if: always()
         run: |
+          pkill -f mihomo || true
           pkill -f sing-box || true
           pkill -f patchright || true
           pkill -f chrome || true
