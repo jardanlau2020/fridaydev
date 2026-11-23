@@ -36,6 +36,7 @@ jobs:
       # 失败策略对齐 openworld：配了订阅却拉不起干净出口 → 直接判本轮失败，
       # 不回落直连硬撞验证码（不写 IS_PROXY=false）。没配订阅才跳过走直连。
       - name: 🏠 启动家宽出口（mihomo）
+        id: egress
         env:
           HOME_SUB_URL: ${{ secrets.HOME_SUB_URL }}
         run: |
@@ -194,6 +195,7 @@ jobs:
             fdalert-
 
       - name: 🚀 运行续期脚本
+        id: renew
         env:
           COOKIE: ${{ secrets.COOKIE }}
           COOKIE_VALUE: ${{ secrets.COOKIE_VALUE }}
@@ -201,7 +203,35 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python -u app.py
+        run: |
+          # marker：下面那个失败告警靠它区分「脚本跑过（告警由 app.py 发）」和
+          # 「压根没进 app.py（出口/依赖/校验挂了，app.py 不会发任何东西）」。
+          touch /tmp/fd_renew_started
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python -u app.py
+
+      # 补一个盲区：出口 / 依赖 / 静态检查在 app.py 之前挂掉时，app.py 一行都不会执行，
+      # 于是 Telegram 一条都不发，只能靠人去 Actions 页面看红点 —— 明天那种「cookie 还是
+      # 出口的锅」就没法第一时间分清。这里只在这种情况下补发一条，脚本跑过则完全不插手
+      # （cookie 失效由 app.py 自己发「登录态失效」，一天一条的去重状态在它手上）。
+      - name: 🚨 失败告警（续期脚本没跑起来时）
+        if: failure()
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          EGRESS_OUTCOME: ${{ steps.egress.outcome }}
+          RENEW_OUTCOME: ${{ steps.renew.outcome }}
+        run: |
+          set +e
+          if [ -f /tmp/fd_renew_started ]; then
+            echo "续期脚本已启动：失败原因由 app.py 的告警说明，这里不重复发"
+            exit 0
+          fi
+          TXT=$(printf '🚨 FridayDev · 续期脚本没跑起来\n\n家宽出口步骤: %s\n续期脚本步骤: %s\n判断: 失败发生在进入 app.py 之前 —— 是出口 / 依赖 / 校验的问题，不是 COOKIE。\n日志: https://github.com/%s/actions/runs/%s' "${EGRESS_OUTCOME:-未执行}" "${RENEW_OUTCOME:-未执行}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}")
+          code=$(curl -s -o /tmp/tg.out -w '%{http_code}' --max-time 20 \
+            "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT_ID}" \
+            --data-urlencode "text=${TXT}")
+          echo "Telegram HTTP ${code}"; head -c 300 /tmp/tg.out || true
 
       - name: 💾 保存告警状态
         if: always()
