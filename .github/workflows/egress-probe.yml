@@ -1,0 +1,170 @@
+name: FD Egress Probe (read-only)
+
+# 一次性探针：只跑 renew.yml 里那段「🏠 启动家宽出口（mihomo）」——代码原样搬过来，
+# 一个字符没改，只是单独拎出来跑，验证它在 GHA x86_64 runner 上真能拿到住宅出口。
+# 不跑 app.py、不点续期、不写 secret。跑完即删。
+
+on:
+  workflow_dispatch:
+
+jobs:
+  egress:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: 🏠 启动家宽出口（mihomo）
+        id: egress
+        env:
+          HOME_SUB_URL: ${{ secrets.HOME_SUB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HOME_SUB_URL:-}" ]; then
+            echo "⚪ 未配置 HOME_SUB_URL，跳过家宽出口（走直连）"
+            exit 0
+          fi
+
+          MIHOMO_VERSION=1.19.34
+          WORK=/tmp/fdproxy
+          mkdir -p "$WORK"
+          cd "$WORK"
+
+          echo "⬇️ 下载 mihomo ${MIHOMO_VERSION}"
+          curl -fsSL --retry 3 -o mihomo.gz \
+            "https://github.com/MetaCubeX/mihomo/releases/download/v${MIHOMO_VERSION}/mihomo-linux-amd64-v${MIHOMO_VERSION}.gz"
+          # 校验值取自 GitHub release asset 官方 digest（v1.19.34, 22731319 bytes）
+          echo "223fab877e5795ce780ba39902e5f0b1113c1256ae244a7160f1165e017e9ccc  mihomo.gz" | sha256sum -c -
+          gunzip -f mihomo.gz
+          mv mihomo mihomo-bin
+          chmod +x mihomo-bin
+
+          mkdir -p mihomo-home
+          if ! curl -fsSL --retry 2 --max-time 60 -o mihomo-home/config.yaml "$HOME_SUB_URL"; then
+            echo "❌ 订阅下载失败"
+            exit 1
+          fi
+
+          # 订阅的 rules 是 MATCH,🚀 节点选择，但这个组在订阅里不存在
+          # （只有 ⚡ CF前置 / 🏠 家宽自动 / 🏠 家宽节点）—— 不改的话默认流量
+          # 落到直连/第一个组，等于没走家宽。直接改指 🏠 家宽自动（fallback 自选）。
+          CP_BEFORE=$(md5sum mihomo-home/config.yaml | cut -d' ' -f1)
+          sed -i 's|^\(  - MATCH,\).*$|\1🏠 家宽自动|' mihomo-home/config.yaml
+          CP_AFTER=$(md5sum mihomo-home/config.yaml | cut -d' ' -f1)
+          if [ "$CP_BEFORE" = "$CP_AFTER" ]; then
+            echo "⚠️ rules 里没找到 MATCH 行，配置未改动"
+          else
+            echo "✅ rules 已改：MATCH -> 🏠 家宽自动"
+          fi
+          grep -n 'MATCH' mihomo-home/config.yaml || true
+
+          echo "--- proxies 统计 ---"
+          echo "openvpn 节点: $(grep -c 'type: openvpn' mihomo-home/config.yaml || true)"
+          echo "节点条目: $(grep -cE '^[[:space:]]*- name:' mihomo-home/config.yaml || true)"
+
+          nohup ./mihomo-bin -d ./mihomo-home -f ./mihomo-home/config.yaml > mihomo.log 2>&1 &
+          sleep 8
+          if ! ss -tuln | grep -q ':7890'; then
+            echo "❌ mihomo 没起来，日志如下"
+            cat mihomo.log || true
+            exit 1
+          fi
+
+          DIRECT_IP="$(curl -s --max-time 8 https://api.ipify.org || echo '')"
+          PROXY_IP="$(curl -s --max-time 25 -x http://127.0.0.1:7890 https://api.ipify.org || echo '')"
+          echo "📡 直连出口 IP: ${DIRECT_IP:-未知}"
+          echo "📡 家宽出口 IP: ${PROXY_IP:-未知}"
+          if [ -z "$PROXY_IP" ]; then
+            echo "❌ 家宽出口不通，直接失败退出（不白跑）"
+            exit 1
+          fi
+          if [ "$PROXY_IP" = "$DIRECT_IP" ]; then
+            echo "❌ 出口 IP 与直连相同，代理没生效，失败退出"
+            exit 1
+          fi
+
+          info=$(curl -s --max-time 20 -x http://127.0.0.1:7890 \
+            'http://ip-api.com/json/?fields=status,query,country,isp,org,as,hosting,proxy' || echo '{}')
+          echo "出口详情: $info"
+          # jq 优先，没装就退回 grep —— GHA 的 ubuntu runner 自带 jq，这里只是兜底。
+          if command -v jq >/dev/null 2>&1; then
+            get_hosting() { echo "$1" | jq -r '.hosting | tostring'; }
+          else
+            get_hosting() { echo "$1" | grep -o '"hosting":[^,}]*' | cut -d: -f2 | tr -d ' '; }
+          fi
+          hosting=$(get_hosting "$info")
+          if [ "$hosting" != "false" ]; then
+            echo "⚠️ 出口不是住宅（hosting=$hosting），尝试把 🏠 家宽节点 切到具体节点"
+            SEL=$(python3 -c "import urllib.parse;print(urllib.parse.quote('🏠 家宽节点'))")
+            for NODE in "🏠 JP-家宽-01" "🏠 JP-家宽-02" "🏠 KR-家宽-01" "🏠 JP-家宽-03"; do
+              NODE_JSON=$(python3 -c "import json,sys;print(json.dumps({'name':sys.argv[1]},ensure_ascii=False))" "$NODE")
+              curl -s -X PUT "http://127.0.0.1:9090/proxies/$SEL" \
+                -H "Content-Type: application/json" --data-binary "$NODE_JSON" || true
+              sleep 4
+              info=$(curl -s --max-time 20 -x http://127.0.0.1:7890 \
+                'http://ip-api.com/json/?fields=status,query,country,isp,org,as,hosting,proxy' || echo '{}')
+              echo "切到 $NODE 后: $info"
+              hosting=$(get_hosting "$info")
+              [ "$hosting" = "false" ] && break
+            done
+          fi
+          if [ "$hosting" != "false" ]; then
+            echo "❌ 仍拿不到住宅出口（hosting=$hosting），本轮失败退出"
+            exit 1
+          fi
+
+          echo "✅ 家宽出口就绪：$PROXY_IP"
+          # 只让业务请求走代理；GitHub / Telegram 走直连，避免 GITHUB_TOKEN 等
+          # Bearer 走第三方住宅出口（同 openworld 的 NO_PROXY 白名单）。
+          NO_PROXY_LIST="localhost,127.0.0.1,::1,github.com,githubusercontent.com,api.telegram.org"
+          echo "IS_PROXY=true"                      >> "$GITHUB_ENV"
+          echo "PROXY_SERVER=http://127.0.0.1:7890" >> "$GITHUB_ENV"
+          echo "HTTP_PROXY=http://127.0.0.1:7890"   >> "$GITHUB_ENV"
+          echo "HTTPS_PROXY=http://127.0.0.1:7890"  >> "$GITHUB_ENV"
+          echo "ALL_PROXY=http://127.0.0.1:7890"    >> "$GITHUB_ENV"
+          echo "NO_PROXY=$NO_PROXY_LIST"            >> "$GITHUB_ENV"
+          echo "no_proxy=$NO_PROXY_LIST"            >> "$GITHUB_ENV"
+
+      - name: 🔎 打印 app.py 会看到的代理环境
+        run: |
+          set -uo pipefail
+          echo "IS_PROXY     = ${IS_PROXY:-<未设置>}"
+          echo "PROXY_SERVER = ${PROXY_SERVER:-<未设置>}"
+          echo "HTTP_PROXY   = ${HTTP_PROXY:-<未设置>}"
+          echo "HTTPS_PROXY  = ${HTTPS_PROXY:-<未设置>}"
+          echo "ALL_PROXY    = ${ALL_PROXY:-<未设置>}"
+          echo "NO_PROXY     = ${NO_PROXY:-<未设置>}"
+          echo "no_proxy     = ${no_proxy:-<未设置>}"
+          echo
+          echo "--- A) curl 不带 -x，靠继承 HTTP(S)_PROXY ---"
+          E1=$(curl -s --max-time 25 https://api.ipify.org || true)
+          echo "env-proxy IP: ${E1:-<空>}"
+          echo "--- B) curl 显式 -x 127.0.0.1:7890 ---"
+          E2=$(curl -s --max-time 25 -x http://127.0.0.1:7890 https://api.ipify.org || true)
+          echo "explicit IP : ${E2:-<空>}"
+          echo "--- C) app.py 的走法：requests 只读 PROXY_SERVER ---"
+          python3 - <<'PY'
+          import json, os, urllib.request
+          ps = os.environ.get("PROXY_SERVER") or ""
+          print("app.py 会读到 IS_PROXY =", repr(os.environ.get("IS_PROXY")))
+          print("app.py 会读到 PROXY_SERVER =", repr(ps))
+          if not ps:
+              print("❌ PROXY_SERVER 没传到后续步骤")
+              raise SystemExit(0)
+          op = urllib.request.build_opener(urllib.request.ProxyHandler({"http": ps, "https": ps}))
+          ip = op.open("https://api.ipify.org", timeout=30).read().decode().strip()
+          print("requests(仅 PROXY_SERVER) 出口 IP:", ip)
+          info = op.open("http://ip-api.com/json/?fields=status,query,country,isp,org,as,hosting,proxy",
+                         timeout=30).read().decode()
+          print("ip-api:", info)
+          d = json.loads(info)
+          print("住宅判定:", "✅ hosting=false 真住宅" if d.get("hosting") is False else "❌ 非住宅 hosting=" + str(d.get("hosting")))
+          PY
+          echo
+          echo "--- D) NO_PROXY 是否真的让 GitHub 走直连 ---"
+          curl -s -o /dev/null -w "api.github.com via NO_PROXY -> HTTP %{http_code}\n" --max-time 25 https://api.github.com/rate_limit || true
+
+      - name: 🧽 清理
+        if: always()
+        run: |
+          pkill -f mihomo || true
+          rm -rf /tmp/fdproxy
+          echo "已清理"
