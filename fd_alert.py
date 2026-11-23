@@ -51,8 +51,9 @@ STEPS = {
         "   `a=1; b=2; ...`（至少要有 PHPSESSID / laravel_session / XSRF-TOKEN）。\n"
         "3. GitHub → repo fridaydev → Settings → Secrets and variables → Actions → 更新 secret `COOKIE`，\n"
         "   整串粘贴，不要换行、不要带引号。\n"
-        "4. Actions → 「Auto Renew FridayDev Service」→ Run workflow → mode=watchdog、dry_run 不勾 → 跑完看日志：\n"
-        "   出现 `✅ 登入成功` + `服务: {...}` 即恢复；仍失败就把日志尾 20 行发给 load藤。\n"
+        "4. Actions → 左栏「Auto Renew Friday」（文件 .github/workflows/renew.yml）→ Run workflow，\n"
+        "   分支选 main 直接点（这个 workflow 没有入参，没有 mode / dry_run 可填）→ 跑完看日志：\n"
+        "   出现 `✅ Cookie 登录成功，已到达服务页` 即恢复；仍失败就把日志尾 20 行发给 load藤。\n"
         "兜底：第 1 步登录后仍被弹到 /404，是站方改版不是 cookie 问题 → 转阿华查前端。"
     ) % (LOGIN, SERVICES),
     "login": (
@@ -60,13 +61,16 @@ STEPS = {
         "2. 能登进去 → 不是密码问题，是出口 IP 被拦或站方加了验证 → 转阿滨查住宅出口（SUB_URL / 节点）。\n"
         "3. 登不进去 → 去邮箱走「忘记密码」重置，再把新密码写进 secret `FD_PASSWORD`\n"
         "   （Settings → Secrets → Actions → FD_PASSWORD，覆盖旧值）。\n"
-        "4. Actions → renew.yml → Run workflow（mode=watchdog）→ 日志出现 `✅ 登入成功` 才算完。"
+        "4. Actions → 左栏「Auto Renew Friday」→ Run workflow（无入参，直接点）→ 日志出现\n"
+        "   `✅ Cookie 登录成功，已到达服务页` 才算完（失败会是 `❌ Cookie 登录失败（auth.php 返回未登录…）`）。"
     ) % LOGIN,
     "structure": (
         "1. 先分清是登录态还是真改版：手工登录后开 %s ，看页面上有没有 `Mes services` 和 `.btn-renew`。\n"
-        "2. 有 → 只是选择器/文案变了 → 转阿华按当前 DOM 改 `renew_v2.py` 的 `parse_service()`。\n"
+        "2. 有 → 只是选择器/文案变了 → 转阿华按当前 DOM 改 `app.py` 的\n"
+        "   `find_renew_button()` / `extract_renewal_date()`（旧版 `renew_v2.py` 已不存在）。\n"
         "3. 没有、或被弹到 /404 → 是登录态 → 按「登录态失效」那 4 步走（重贴 COOKIE）。\n"
-        "4. 改完手动 dispatch 一次 renew.yml，日志出现 `服务: {` 才算恢复。"
+        "4. 改完手动 dispatch 一次 renew.yml，日志出现 `✅ 发现续期按钮` 或 `ℹ️ 未找到续期按钮`\n"
+        "   才算页面读到了（页面没读到才是 `❌ 执行异常` 或空正文）。"
     ) % SERVICES,
     "renew_failed": (
         "1. 手工打开 %s ，看「Renouveler」按钮是否可点、到期日是多少（截图留证）。\n"
@@ -84,13 +88,15 @@ STEPS = {
         "1. 浏览器开 %s 登录，再开 %s 确认服务卡可见。\n"
         "2. F12 → Application → Cookies → fridaydev.fr，全部 cookie 复制成一串 `a=1; b=2; ...`。\n"
         "3. repo fridaydev → Settings → Secrets → Actions → 更新 secret `COOKIE`（整串，无换行）。\n"
-        "4. Actions → 「FD Turnstile Probe (read-only)」→ Run workflow → 日志出现 `[0] URL = %s` 即恢复。"
-    ) % (LOGIN, SERVICES, SERVICES),
+        "4. 验登录态：本仓现在只有 renew.yml 一个 workflow，没有独立探针；要快速确认就\n"
+        "   让阿华临时开一次只读探针（只问 /php/auth.php 的 isLoggedIn，不点续期）。"
+    ) % (LOGIN, SERVICES),
     "probe_other": (
-        "1. 打开该次 run 的日志，找 `[API 回應]` 那一行，看 status 是 428 还是别的。\n"
-        "2. 428 + captcha_required → 是 Turnstile 拦截，不是 cookie 问题 → 转阿滨（出口）或阿华（前端）。\n"
-        "3. 401/403/跳登录 → 按「COOKIE 已失效」4 步重贴 cookie。\n"
-        "4. 探针只读，不需要立刻处理；把 run 链接发给 load藤即可。"
+        "1. 打开该次 run 的日志，先看是哪一类：`❌ Cookie 登录失败（auth.php 返回未登录…）` → cookie 死了；\n"
+        "   `❌ 验证超时。` → Turnstile/出口；`❌ 家宽出口不通` / `❌ 仍拿不到住宅出口` → 出口。\n"
+        "2. `❌ 验证超时。` → 是 Turnstile 拦截，不是 cookie 问题 → 转阿滨（出口）或阿华（前端）。\n"
+        "3. 登录失败 → 按「COOKIE 已失效」那 4 步重贴 cookie。\n"
+        "4. 把 run 链接发给 load藤即可。"
     ),
     "renew_ok": (
         "1. 打开 %s 看一眼服务卡，确认到期日已经往后推（截图留证）。\n"
